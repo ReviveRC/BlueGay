@@ -1,0 +1,27 @@
+dialog.together-modal {width:560px;max-height:calc(100dvh - 48px)}
+.together-modal #modal-content {display:flex;flex-direction:column;max-height:calc(100dvh - 50px)}
+.together-modal .modal-header {flex-shrink:0;padding:20px 24px 16px}
+.together-modal .together-dialog {display:flex;flex-direction:column;gap:16px;min-height:0;overflow-y:auto;overscroll-behavior:contain;padding:0 24px 24px;scrollbar-width:thin}
+.together-dialog > * {flex-shrink:0}
+.together-dialog p {margin:0;line-height:1.6}
+.together-dialog label {display:flex;flex-direction:column;gap:7px;line-height:1.5}
+.together-dialog input:not([type=checkbox]) {width:100%;min-height:38px;padding:9px 11px;color:var(--text);background:var(--base);border:1px solid var(--line);border-radius:6px}
+.together-dialog input:focus-visible {outline:2px solid var(--accent);outline-offset:2px}
+.together-dialog fieldset {min-width:0;margin:0;border:1px solid var(--line);border-radius:8px;padding:14px 16px;display:flex;flex-direction:column;gap:14px}
+.together-dialog legend {padding:0 6px;font-size:12px;font-weight:600}
+.together-dialog fieldset label {display:grid;grid-template-columns:16px minmax(0,1fr);gap:10px;align-items:start;margin:0}
+.together-dialog input[type=checkbox] {width:16px;height:16px;min-width:16px;margin:2px 0 0;padding:0;accent-color:var(--accent)}
+.together-dialog small,.together-dialog .muted {color:var(--muted);font-size:12px;line-height:1.5}
+.together-dialog label small {display:block;margin-top:2px;font-size:11px}
+.together-dialog .primary-button,.together-dialog .secondary-button {min-height:36px;line-height:1.4}
+.together-dialog hr {width:100%;height:0;align-self:stretch;margin:2px 0;border:0;border-top:1px solid var(--line)}
+.together-dialog .together-note {padding:12px 14px;background:var(--base);border:1px solid var(--line);border-radius:8px;font-size:11px;line-height:1.6;overflow-wrap:anywhere}
+@media(max-width:480px){.together-modal .modal-header{padding:16px 18px 14px}.together-modal .together-dialog{padding:0 18px 20px}}
+#together-presence {display:flex;align-items:center;gap:5px;padding:0 10px;flex-shrink:0;max-width:45%;overflow-x:auto}
+#together-presence[hidden] {display:none}
+.together-color-0 {--peer:#f472b6}.together-color-1 {--peer:#60a5fa}.together-color-2 {--peer:#34d399}.together-color-3 {--peer:#fbbf24}.together-color-4 {--peer:#a78bfa}.together-color-5 {--peer:#fb923c}
+.together-avatar {height:27px;width:27px;border-radius:50%;border:2px solid var(--peer);background:var(--bg);color:var(--peer);font-size:10px;font-weight:700;cursor:pointer}
+.together-state {border:0;background:transparent;color:var(--muted);font-size:11px;cursor:pointer}
+.together-cursor {border-left:2px solid var(--peer)}
+.together-cursor-label {background:var(--peer);color:#111827;border-radius:3px;font-size:10px;font-weight:700;margin-right:2px}
+.together-glyph {background:var(--peer);border-radius:50%;transform:scale(.5)}

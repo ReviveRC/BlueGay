@@ -1,0 +1,22 @@
+{
+  "pythonVersion": "1.8.22",
+  "junit": {
+    "version": "1.13.4",
+    "url": "https://repo.maven.apache.org/maven2/org/junit/platform/junit-platform-console-standalone/1.13.4/junit-platform-console-standalone-1.13.4.jar",
+    "sha256": "3fdfc37e29744a9a67dd5365e81467e26fbde0b7aa204e6f8bbe79eeaa7ae892"
+  },
+  "java": [
+    {
+      "id": "jdtls",
+      "version": "1.57.0",
+      "url": "https://github.com/redhat-developer/vscode-java/releases/download/v1.57.0/vscode-java-1.57.0-1110.vsix",
+      "sha256": "80a6b852577aec37510b1f975e188279181e8c30ab5cae88812d941cd2d11bff"
+    },
+    {
+      "id": "java-debug",
+      "version": "0.60.0",
+      "url": "https://open-vsx.org/api/vscjava/vscode-java-debug/0.60.0/file/vscjava.vscode-java-debug-0.60.0.vsix",
+      "sha256": "f09ebe358a7b08b3c17b21b8d8207b0649acad120eb6f1604dc4f15379f59d66"
+    }
+  ]
+}

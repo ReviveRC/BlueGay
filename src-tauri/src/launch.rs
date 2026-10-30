@@ -1,0 +1,8 @@
+//! Paths from the OS launch command are trusted user selections, never webview grants.
+use std::{path::{Path,PathBuf},sync::Mutex};
+use tauri::{Emitter,Manager,State};
+#[derive(Default)]pub struct LaunchState(Mutex<Vec<String>>);
+pub fn paths(args:Vec<String>,cwd:&Path)->Vec<PathBuf>{let mut literal=false;args.into_iter().skip(1).filter_map(|arg|{if arg=="--"{literal=true;return None;}if !literal&&arg.starts_with('-'){return None;}let path=if arg.starts_with("file:"){reqwest::Url::parse(&arg).ok()?.to_file_path().ok()?}else{PathBuf::from(arg)};Some(if path.is_absolute(){path}else{cwd.join(path)})}).collect()}
+pub fn enqueue(app:&tauri::AppHandle,args:Vec<String>,cwd:&Path){let paths=paths(args,cwd);if paths.is_empty(){return;}match app.state::<crate::disk::DiskState>().queue_drop(&paths){Ok(id)=>{if let Ok(mut pending)=app.state::<LaunchState>().0.lock(){pending.push(id);}let _=app.emit("bluegay-launch-request",());},Err(error)=>{let _=app.emit("bluegay-drop-error",error);}}}
+#[tauri::command]pub fn take_launch_requests(state:State<'_,LaunchState>)->Vec<String>{state.0.lock().map(|mut queue|std::mem::take(&mut *queue)).unwrap_or_default()}
+#[cfg(test)]mod tests{use super::*;#[test]fn launch_paths_preserve_spaces_unicode_and_working_directory(){let cwd=std::env::temp_dir();let absolute=cwd.join("été project");let args=vec!["BlueGay.exe".into(),"--file".into(),"hello world.py".into(),absolute.to_string_lossy().into(),"--".into(),"-notes.md".into()];assert_eq!(paths(args,&cwd),vec![cwd.join("hello world.py"),absolute,cwd.join("-notes.md")]);let url=reqwest::Url::from_file_path(cwd.join("a #é.pdf")).unwrap();assert_eq!(paths(vec!["app".into(),url.to_string()],&cwd),vec![cwd.join("a #é.pdf")]);}}

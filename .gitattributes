@@ -1,0 +1,2 @@
+# Preserve source, fixtures, and bundled assets exactly as packaged on Windows.
+* -text

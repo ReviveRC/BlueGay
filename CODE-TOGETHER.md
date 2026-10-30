@@ -1,0 +1,26 @@
+# Code Together
+
+Use the people/code icon directly below ChatLGBT in the left toolbar. Both people need the desktop executable. The browser preview shows where to find the feature but cannot host or join native projects.
+
+1. The host opens a project folder, opens Code Together, enters a display name, selects permissions, and clicks **Host this project**. Hosting saves pending project edits first.
+2. Copy the invite code and share it with collaborators. The host process runs on this computer; no project is uploaded to a relay.
+3. Participants enter their display name and paste the code into **Join project**. Their IDE opens the shared folder remotely. Their previous local workspace is restored when they leave.
+4. The host can change permissions with **Apply permissions**, or end access with **Stop hosting**. Stopping, closing the host app, or reloading its window ends the session; a new session gets a fresh random code.
+
+**Networking:** computers must be reachable on the same LAN or VPN. The default interface is selected automatically. If using a VPN or multiple network adapters, enter the host's LAN/VPN IPv4 address before hosting. Allow BlueGay through the host's firewall when Windows asks. There is no internet relay, NAT traversal, or automatic port forwarding. Direct LAN traffic is not encrypted; use a trusted network or an encrypted VPN. The invite code is an access secret for the entire selected project, including hidden files.
+
+**Permissions:** sessions start read only. Allow editing grants text writes. Allow creating, renaming and deleting files/folders additionally requires editing permission. Both the interface and the host enforce these permissions; a participant cannot escape the shared root or access other folders the host has opened. Deletions go to the host's Recycle Bin.
+
+**Console and debugging:** **Allow console and debugging** is off by default and independent of editing permission. When enabled, connected participants can launch saved Python/Java sources, send program input, evaluate expressions and control their own debug sessions. Programs execute on the **host's computer** using the host's selected runtimes, environment and operating-system access. Enable this only for collaborators whose code you trust. The host installs/configures debugging tools through Run → Debugger settings; guests cannot change those tools. Applying permissions with console access disabled stops guest sessions and their process trees. Leaving, stopping hosting, or closing the app also stops the affected guest sessions. Local host debug sessions stay separate. See [DEBUGGING.md](DEBUGGING.md).
+
+The same console permission controls Java compilation and JUnit testing. Guests see their own test results while execution happens on the host. If JUnit tools have not been installed, the host can set up Java tools or run tests once to install them. See [JAVA-TESTING.md](JAVA-TESTING.md).
+
+**Live editing:** edits save automatically after a short pause, even when ordinary autosave is off, and project changes and cursor locations refresh about once per second. New files, folder changes, renames and deletions propagate to everyone. Concurrent changes to the same file are version checked: overlapping unsaved buffers are retained and flagged for review, rather than silently overwritten. This version does not provide CRDT character merging, selections, or shared undo. Accepted ChatLGBT changes retain their existing explicit-save requirement.
+
+**Collaborators:** colored initial badges appear beside the editor tabs. Hover to see the person's name, file and line; click to jump there. Colored cursor/name labels and gutter dots mark collaborator positions inside a file. Disconnected collaborators expire after 15 seconds. Sessions support up to 32 presence entries.
+
+**Disconnects:** a participant's editor becomes read only while the host is unreachable, and reconnects automatically if the session returns. Unsaved edits stay available. Use **Download file** or **Export project** to keep a local copy (existing export restrictions for binary files apply). A separate recovery snapshot preserves remote work without overwriting the local project's saved session; **Recover last remote workspace** opens those edits as local drafts after a restart. Invite codes are never stored in recovery snapshots. Leave the session before opening another local project or using Save As on the shared files.
+
+Existing native workspace limits apply: UTF-8 editable files up to 50 MB, up to 2,000 file entries, 4,000 folder entries, and 128 MB of loaded workspace content. **Open anyway** can explicitly load text beyond the default file/scan size limit, or show binary entries as read-only hex previews. It does not change host permissions or project-root restrictions. Remote transfers remain subject to protocol frame limits and network timeouts.
+
+The native tests exercise real localhost connections, permissions, stale-version conflicts, project-root confinement, token authentication, frame limits, and presence lifecycle. UI tests cover synchronization, recovery isolation, permission checks, disconnection and collaborator decorations. Two physical computers and Windows firewall prompts still require a LAN/VPN smoke test.
