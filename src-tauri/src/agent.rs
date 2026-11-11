@@ -65,6 +65,13 @@ pub fn agent_cancel(id: String, state: tauri::State<AgentState>) -> Result<(), S
 #[derive(Clone, Serialize)]
 struct Chunk { id: String, chunk: Vec<u8> }
 
+#[derive(Clone, Serialize)]
+struct UsageHeaders {
+    id: String,
+    chunk: Vec<u8>,
+    limits: HashMap<&'static str, u64>,
+}
+
 async fn renewable_credentials<F>(cancel:&watch::Receiver<bool>,renew:F)->Result<String,String>
 where F:std::future::Future<Output=Result<String,String>> {
     if *cancel.borrow(){return Err("Request stopped.".into())}
@@ -88,14 +95,28 @@ pub async fn agent_respond(id: String, payload: Request, window: tauri::WebviewW
     }
     let result=async {
         let uses_chatgpt=payload.auth_provider=="chatgpt";
-        let key=if uses_chatgpt {renewable_credentials(&cancel,crate::chatgpt::access(&account,&payload.account_id)).await?} else {api_key().ok_or("Configure an API key in ChatLGBT settings first.")?};
+        let mut key=if uses_chatgpt {renewable_credentials(&cancel,crate::chatgpt::access(&account,&payload.account_id)).await?} else {api_key().ok_or("Configure an API key in ChatLGBT settings first.")?};
         let client=reqwest::Client::builder().timeout(Duration::from_secs(if lane=="prediction" {20} else {180})).redirect(reqwest::redirect::Policy::none()).build().map_err(|_| "Could not initialize model connection.")?;
         let body=payload.wire_body()?;
-        let send=client.post("https://api.openai.com/v1/responses").bearer_auth(&key).json(&body).send();
+        let send=|key:&str| client.post("https://api.openai.com/v1/responses").bearer_auth(key).json(&body).send();
         let mut response=tokio::select! {
             _=cancel.changed()=>return Err("Request stopped.".to_string()),
-            result=send=>result.map_err(|_| "Could not connect to the model service.".to_string())?,
+            result=send(&key)=>result.map_err(|_| "Could not connect to the model service.".to_string())?,
         };
+        if uses_chatgpt && response.status()==reqwest::StatusCode::UNAUTHORIZED {
+            key=renewable_credentials(&cancel,crate::chatgpt::access_after_rejection(&account,&payload.account_id,Some(&key))).await?;
+            response=tokio::select! {
+                _=cancel.changed()=>return Err("Request stopped.".to_string()),
+                result=send(&key)=>result.map_err(|_| "Could not connect to the model service.".to_string())?,
+            };
+        }
+        if !uses_chatgpt && lane=="chat" {
+            let limits=["requests","tokens"].into_iter().filter_map(|kind| {
+                let value=response.headers().get(format!("x-ratelimit-remaining-{kind}"))?.to_str().ok()?.parse().ok()?;
+                Some((kind,value))
+            }).collect();
+            let _=window.emit("chatlgbt-chunk",UsageHeaders { id:id.clone(), chunk:vec![], limits });
+        }
         if !response.status().is_success() {
             if uses_chatgpt {return Err(crate::chatgpt::provider_error(response,&key).await);}
             return Err(match response.status().as_u16() {

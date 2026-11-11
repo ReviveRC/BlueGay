@@ -3,11 +3,11 @@ const chatCore=window.ChatLGBTCore;
 // Current general-purpose Responses API models, verified against the official catalog on 2026-10-22.
 const chatModels=[{id:'gpt-6.1-sol',label:'GPT-6.1 Sol — balanced'},{id:'gpt-6-astra',label:'GPT-6 Astra — complex reasoning & coding'},{id:'gpt-6-luna',label:'GPT-6 Luna — fast & economical'}];
 const chatExternalLinks={billing:'https://platform.openai.com/settings/organization/billing/overview',students:'https://chatgpt.com/codex/offers/students',usage:'https://chatgpt.com/settings/usage',account:'https://chatgpt.com/#settings'};
-const chat={messages:[],attachments:[],request:null,epoch:0,lastApplied:null,ready:false,status:null,infoHidden:false};
+const chat={messages:[],attachments:[],request:null,epoch:0,lastApplied:null,ready:false,status:null,infoHidden:false,apiLimits:null,planLimitAccount:null};
 try{chat.infoHidden=localStorage.getItem('bluegay.agent.infoHidden')==='true';}catch{}
 let chatLastEditor=null;
 let chatSettings={provider:'api',connectionSelected:false,model:'gpt-6.1-sol',tone:'sparkle',maxOutput:6000};
-try{const saved=JSON.parse(localStorage.getItem('bluegay.agent.settings')||'null');if(saved)chatSettings={...chatSettings,provider:saved.provider==='chatgpt'?'chatgpt':'api',model:String(saved.model||chatSettings.model),tone:['sparkle','balanced','quiet'].includes(saved.tone)?saved.tone:'sparkle',maxOutput:[3000,6000,12000].includes(+saved.maxOutput)?+saved.maxOutput:6000};}catch{}
+try{const saved=JSON.parse(localStorage.getItem('bluegay.agent.settings')||'null');if(saved)chatSettings={...chatSettings,provider:saved.provider==='chatgpt'?'chatgpt':'api',connectionSelected:saved.connectionSelected===true,model:String(saved.model||chatSettings.model),tone:['sparkle','balanced','quiet'].includes(saved.tone)?saved.tone:'sparkle',maxOutput:[3000,6000,12000].includes(+saved.maxOutput)?+saved.maxOutput:6000};}catch{}
 
 function chatBillingNotice(detailed=false){
   if(chatSettings.provider==='chatgpt')return `<div class="chat-billing-notice"><strong>Using ChatGPT plan</strong><p>Eligible requests use your signed-in ChatGPT account’s allowance. Credit use depends on eligibility and your credit-sharing settings. API-key billing is a separate option.</p><a data-chat-external="usage" href="${chatExternalLinks.usage}" target="_blank" rel="noopener noreferrer">Manage ChatGPT usage & credits ↗</a>${chatStudentOffer()}<span data-chat-link-status role="status"></span></div>`;
@@ -41,6 +41,10 @@ function ensureChatLGBT(){
   const panel=document.createElement('aside');panel.id='chatlgbt';panel.className='chat-panel';panel.hidden=true;panel.setAttribute('aria-label','ChatLGBT assistant');
   panel.innerHTML=`<div class="chat-heading"><div class="chat-emblem">✦</div><div><strong>ChatLGBT</strong><small>YOUR CODING BESTIE</small></div><button class="icon-button" id="chat-new" title="New chat" aria-label="New chat">＋</button><button class="icon-button" id="chat-settings" title="ChatLGBT settings" aria-label="ChatLGBT settings">⚙</button><button class="icon-button" id="chat-close" aria-label="Close ChatLGBT">×</button></div>
     <div class="chat-model"><span class="local-dot"></span><span id="chat-model-name"></span><button id="chat-info-toggle" aria-controls="chat-info" aria-expanded="true">Hide info</button></div>
+    <div class="chat-usage"><span id="chat-usage-summary" role="status"></span>
+      <a id="chat-usage-plan" data-chat-external="usage" href="${chatExternalLinks.usage}" target="_blank" rel="noopener noreferrer">View plan usage ↗</a>
+      <a id="chat-usage-api" data-chat-external="billing" href="${chatExternalLinks.billing}" target="_blank" rel="noopener noreferrer">View API balance ↗</a>
+    </div>
     <div id="chat-info">
     <div id="chat-key-required" class="chat-key-required"><strong>Connect ChatLGBT</strong><p>Continue with ChatGPT, or use your own API key with separate API billing.</p><button id="chat-connect" class="primary-button">Account settings</button></div>
     <div id="chat-billing">${chatBillingNotice()}</div></div><div id="chat-messages" class="chat-messages" role="log" aria-label="ChatLGBT conversation" aria-live="off"></div>
@@ -65,10 +69,32 @@ function ensureChatLGBT(){
   $('#chat-prompt').onkeydown=e=>{if((e.ctrlKey||e.metaKey)&&e.key==='Enter'){e.preventDefault();sendChatMessage();}};
   renderChat();renderChatAttachments();
 }
-function toggleChatLGBT(force){ensureChatLGBT();const panel=$('#chatlgbt');panel.hidden=typeof force==='boolean'?!force:!panel.hidden;document.body.classList.toggle('chat-open',!panel.hidden);if(!panel.hidden){$('#chat-prompt').focus();refreshChatStatus();}}
+function toggleChatLGBT(force){ensureChatLGBT();const panel=$('#chatlgbt');panel.hidden=typeof force==='boolean'?!force:!panel.hidden;document.body.classList.toggle('chat-open',!panel.hidden);if(!panel.hidden){$('#chat-prompt').focus();refreshChatStatus().then(async status=>{if(status?.provider==='chatgpt'&&status.configured&&!availableChatModels().length){await window.BlueGayAccount?.loadModels();renderChat();}});}}
 function chatNotice(text){if(chat.ready)$('#chat-status').textContent=text;}
+function renderChatUsage(){
+  if (!chat.ready) return;
+  const plan=chatSettings.provider==='chatgpt';
+  $('#chat-usage-plan').hidden=!plan;
+  $('#chat-usage-api').hidden=plan;
+  const locale=prefs.locale==='fr-CA'?'fr-CA':'en';
+  const translate=value=>window.BlueGayI18n?.translate(value)||value;
+  const counts=chat.apiLimits?.model===chatSettings.model?chat.apiLimits:null;
+  const stats=counts ? ['requests','tokens'].filter(kind=>Number.isSafeInteger(counts[kind])&&counts[kind]>=0)
+    .map(kind=>counts[kind].toLocaleString(locale)+' '+translate(kind==='requests'?'requests left':'tokens left')) : [];
+  const summary=plan
+    ? (chat.planLimitAccount && chat.planLimitAccount===window.BlueGayAccount?.active()?.id?'ChatGPT usage limit reached':'ChatGPT plan allowance')
+    : (stats.length?stats.join(' · ')+' · '+translate('Last API response'):'API balance and limits');
+  const el=$('#chat-usage-summary');
+  const display=translate(summary);
+  if (el.textContent!==display) el.textContent=display;
+}
+function updateChatApiLimits(model,limits){
+  chat.apiLimits={model,...limits};
+  renderChatUsage();
+}
 function renderChatInfo(){
   if(!chat.ready)return;
+  renderChatUsage();
   $('#chat-info').hidden=chat.infoHidden;
   const toggle=$('#chat-info-toggle');toggle.textContent=chat.infoHidden?'Show info':'Hide info';toggle.setAttribute('aria-expanded',String(!chat.infoHidden));
 }
@@ -137,7 +163,7 @@ function searchChatContext(){
 }
 async function refreshChatStatus(){
   if(chatSettings.provider==='chatgpt'){
-    try{const accounts=window.BlueGayAccount;if(!accounts||!disk.available)throw Error('ChatGPT sign-in requires the Windows desktop app.');await accounts.refresh();const account=accounts.active();chat.status={configured:!!account?.planEnabled,provider:'chatgpt',accountId:account?.id};if(chat.ready){$('#chat-key-required').hidden=chat.status.configured;$('#chat-send').textContent=chat.status.configured?'Send ↗':'Connect account';$('#chat-billing').innerHTML=chatBillingNotice();}chatNotice(account?.planEnabled?'Using ChatGPT plan. Manage limits and credit sharing in Account settings.':account?'Enable ChatGPT plan usage in Account settings.':'Sign in with ChatGPT in Account settings.');return chat.status;}catch(error){chat.status={configured:false,provider:'chatgpt'};chatNotice(error.message||String(error));return null;}
+    try{const accounts=window.BlueGayAccount;if(!accounts||!disk.available)throw Error('ChatGPT sign-in requires the Windows desktop app.');await accounts.refresh();const account=accounts.active();chat.status={configured:!!account?.planEnabled,provider:'chatgpt',accountId:account?.id};if(chat.ready){$('#chat-key-required').hidden=chat.status.configured;$('#chat-send').textContent=chat.status.configured?'Send ↗':'Connect account';$('#chat-billing').innerHTML=chatBillingNotice();renderChatUsage();}chatNotice(account?.planEnabled?'Using ChatGPT plan. Manage limits and credit sharing in Account settings.':account?'Enable ChatGPT plan usage in Account settings.':accounts.state.message||'Sign in with ChatGPT in Account settings.');return chat.status;}catch(error){chatNotice(error.message||String(error));return null;}
   }
   try{const status=disk.available?await disk.call('agent_status'):await fetch('/api/chatlgbt/status').then(r=>{if(!r.ok)throw Error('Restart the preview server to enable ChatLGBT.');return r.json();});chat.status=status;if(chat.ready){$('#chat-key-required').hidden=!!status.configured;$('#chat-send').textContent=status.configured?'Send ↗':'Enter API key';}chatNotice(status.configured?'API key connected. API credits/billing required; balance not checked.':'API key and API credits required. Select Enter API key to connect ChatLGBT.');return status;}catch(error){chatNotice(error.message||String(error));return null;}
 }
@@ -164,18 +190,37 @@ async function sendChatMessage(){
     });
     if(disk.available){
       let parseFailure;
-      const unlisten=await window.__TAURI__.event.listen('chatlgbt-chunk',event=>{if(event.payload.id===request.id&&!parseFailure)try{parser.push(new Uint8Array(event.payload.chunk));}catch(error){parseFailure=error;disk.call('agent_cancel',{id:request.id}).catch(()=>{});}});
+      const unlisten=await window.__TAURI__.event.listen('chatlgbt-chunk',({payload:chunk})=>{
+        if (chunk.id!==request.id || request.stopped || request.epoch!==chat.epoch || parseFailure) return;
+        if (chunk.limits) {updateChatApiLimits(payload.model,chunk.limits);return;}
+        try {parser.push(new Uint8Array(chunk.chunk));}
+        catch(error){parseFailure=error;disk.call('agent_cancel',{id:request.id}).catch(()=>{});}
+      });
       try{if(!request.stopped)await disk.call('agent_respond',{id:request.id,payload});if(parseFailure)throw parseFailure;}finally{unlisten();}
     }else{
       const response=await fetch('/api/chatlgbt/respond',{method:'POST',headers:{'Content-Type':'application/json','X-BlueGay-Agent':status.token},body:JSON.stringify(payload),signal:request.controller.signal});
+      if (!request.stopped && request.epoch===chat.epoch) {
+        const counts={};
+        for (const kind of ['requests','tokens']) {
+          const value=response.headers?.get('x-ratelimit-remaining-'+kind);
+          if (value && /^\d+$/.test(value)) counts[kind]=Number(value);
+        }
+        updateChatApiLimits(payload.model,counts);
+      }
       if(!response.ok){const error=await response.json();throw Error(error.error||'Request failed.');}
       const reader=response.body.getReader();try{while(true){const {value,done}=await reader.read();if(done)break;parser.push(value);}}finally{reader.releaseLock();}
     }
     if(request.stopped||request.epoch!==chat.epoch)return;
     parser.finish();if(streamError)throw Error(streamError);if(!completed)throw Error('The connection ended early. No edits are available from this response.');
+    if (payload.auth_provider==='chatgpt') chat.planLimitAccount=null;
     reply.edits=chatCore.parseProposal(reply.text,attachments,allPaths);reply.epoch=request.epoch;
     chatNotice(reply.edits.length?'Changes are ready to review.':'Done, bestie. 💅');
-  }catch(error){if(request.epoch===chat.epoch){reply.error=request.stopped?'Stopped. No proposed edits were applied.':streamError||error.message||String(error);reply.edits=[];chatNotice(reply.error);}}
+  }catch(error){if(request.epoch===chat.epoch){reply.error=request.stopped?'Stopped. No proposed edits were applied.':streamError||error.message||String(error);reply.edits=[];chatNotice(reply.error);
+    if (payload.auth_provider==='chatgpt' && !request.stopped) {
+      if (/\bsubscription_sharing_usage_limit_exceeded\b/.test(reply.error)) chat.planLimitAccount=payload.account_id;
+      if (reply.error.startsWith('Your ChatGPT session ended.')) refreshChatStatus();
+    }
+  }}
   finally{request.controller.abort();if(request.epoch===chat.epoch){if(request.stopped){reply.error='Stopped. No proposed edits were applied.';reply.edits=[];chatNotice(reply.error);}if(reply.error){userMessage.failed=true;if(!$('#chat-prompt').value)$('#chat-prompt').value=prompt;}}if(chat.request===request)chat.request=null;renderChat();updateChatEstimate();}
 }
 function reviewChatProposal(message){

@@ -98,6 +98,7 @@ fn main() {
             let config = app.path().app_config_dir()?;
             app.manage(settings::SettingsState { path: config.join("settings.json"), writes: std::sync::Mutex::new(()) });
             app.manage(chatgpt::ChatGptState::new(config.join("chatgpt-accounts.dpapi")));
+            chatgpt::maintain_session(app.handle().clone());
             app.manage(disk::DiskState::load(config));
             launch::enqueue(app.handle(),std::env::args().collect(),&std::env::current_dir().unwrap_or_default());
             app.manage(debugger::DebuggerState::new(app.path().app_config_dir()?.join("debugger")));
@@ -130,7 +131,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             disk::open_folder, disk::open_files, disk::open_dropped_paths, disk::read_document,
             disk::save_document, disk::save_document_as, disk::create_folder,
-            disk::rename_document, disk::trash_document, disk::export_bytes,
+            disk::rename_document, disk::trash_document, disk::export_bytes, disk::export_archive, disk::read_archive_chunk,
             disk::refresh_workspace, disk::trash_folder,
             enable_close_guard, finish_close, open_chat_link,
             settings::load_settings, settings::save_settings,

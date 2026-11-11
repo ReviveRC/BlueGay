@@ -54,6 +54,24 @@ test('a snapshot in flight cannot revert a newer completed save',async()=>{
   const polling=h.run('pollTogether()');h.run("files[0].content=files[0].saved='new save';files[0].disk.version='v3'");finish(snapshot('stale','v2'));await polling;
   assert.equal(h.run('files[0].content'),'new save');assert.equal(h.run('files[0].disk.version'),'v3');
 });
+test('a local save during a delta refresh does not block another file from syncing',async()=>{
+  let finish;
+  const h=setup((_command,{args})=>{
+    assert.equal(args.known['a.js'],'v1');
+    assert.equal(args.known['b.js'],'v1');
+    return new Promise(resolve=>{finish=resolve;});
+  });
+  h.run(`for (const path of ['b.js','keep.js','gone.js']) files.push({...files[0],id:path,path,disk:{path:'together/'+path,version:'v1'}});`);
+  const polling=h.run('pollTogether()');
+  h.run("files[0].content=files[0].saved='new local save';files[0].disk.version='v3'");
+  const delta=snapshot('old snapshot','v2');
+  delta.workspace.files.push({path:'b.js',absolutePath:'together/b.js',content:'peer edit',version:'v2'});
+  delta.workspace.removed=['gone.js'];
+  finish(delta);
+  await polling;
+  assert.deepEqual(JSON.parse(h.run('JSON.stringify(files.map(f=>[f.path,f.content]))')),
+    [['a.js','new local save'],['b.js','peer edit'],['keep.js','old']]);
+});
 test('connection failure locks the guest editor and keeps edits for recovery',async()=>{
   const h=setup(async()=>{throw {message:'Host unavailable'};});h.run("files[0].content='unsaved'");await h.run('pollTogether()');assert.equal(h.run('togetherReadOnly()'),true);assert.equal(h.run('files[0].content'),'unsaved');
 });

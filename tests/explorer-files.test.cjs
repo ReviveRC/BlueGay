@@ -105,9 +105,48 @@ test('browser imports retain binary, GIF, large and dependency entries as approp
   assert.equal(h.run('files.some(fileDirty)'),false);
 });
 
-test('binary entries block incomplete ZIP exports and never enter text write-back',async()=>{
+test('ZIP export preserves imported binary bytes after opening a hex preview',async()=>{
+  const h=harness();
+  h.context.fflate=require('../dist/vendor/fflate.js');
+  h.context.TextDecoder=TextDecoder;
+  h.context.bytes=Uint8Array.of(137,80,0,71,255);
+  h.run(`files=[];tabs=[];activeId=null;mergeFiles([importedEntry('img/photo.png',bytes)]);
+    files.push({path:'src/a.js',content:'unsaved text'});explicitFolders=['empty'];
+    downloadBlob=async(blob,name)=>{window.zip={blob,name};};`);
+  await h.run('openUnsupportedAnyway(files[0])');
+  assert.match(h.run('files[0].content'),/Read-only binary preview/);
+  await h.run('exportZip()');
+  const result=h.context.fflate.unzipSync(new Uint8Array(await h.context.window.zip.blob.arrayBuffer()));
+  assert.deepEqual(result['img/photo.png'],h.context.bytes);
+  assert.equal(h.context.fflate.strFromU8(result['src/a.js']),'unsaved text');
+  assert.equal(result['empty/'].length,0);
+});
+
+test('native ZIP export reads binary chunks from disk and writes the archive as raw bytes',async()=>{
+  const calls=[];
+  let archive;
+  const h=harness(async (command,args)=>{
+    if (command==='read_archive_chunk') {
+      calls.push([args.path,args.offset,args.version]);
+      return {base64:args.offset===0?'iVAA':'R/8=',size:5,version:'same'};
+    }
+    if (command==='export_archive') {archive=Buffer.from(args);return true;}
+    throw Error('Unexpected command '+command);
+  });
+  h.context.fflate=require('../dist/vendor/fflate.js');
+  h.context.atob=atob;
+  h.context.target=structuredClone(nativeFile);
+  h.run(`files=[target];explicitFolders=[];projectName='Mixed project';`);
+  await h.run('exportZip()');
+  assert.deepEqual(calls,[[nativeFile.disk.path,0,null],[nativeFile.disk.path,3,'same']]);
+  const separator=archive.indexOf(0);
+  assert.equal(archive.subarray(0,separator).toString(),'Mixed project.zip');
+  const result=h.context.fflate.unzipSync(new Uint8Array(archive.subarray(separator+1)));
+  assert.deepEqual(result[nativeFile.path],Uint8Array.of(137,80,0,71,255));
+});
+
+test('binary entries never enter text write-back',async()=>{
   const h=harness();h.context.target=structuredClone(nativeFile);h.run('files=[target];window.notice="";toast=text=>window.notice=text');
-  await h.run('exportZip()');assert.match(h.context.window.notice,/non-text files/);
   h.context.window.showDirectoryPicker=async()=>({name:'folder',getFileHandle(){throw Error('Must not overwrite binary');}});
   h.run('confirmAction=(title,body,action)=>{window.written=action()}');await h.run('writeBack()');await h.context.window.written;
   assert.match(h.context.window.notice,/Wrote 0 files/);

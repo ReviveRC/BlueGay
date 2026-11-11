@@ -43,3 +43,6 @@ dialog.debug-settings-modal{width:700px;max-width:calc(100vw - 30px);max-height:
 .documentation-comment-choice select{width:100%;font-size:12px}
 .documentation-comment-choice p{margin-bottom:0}
 .java-test-failure-summary{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;margin-top:4px;color:#ef9393;font-size:11px;line-height:1.5;white-space:pre-wrap}.java-test-value{margin:10px 0;padding:8px 10px;border:1px solid var(--border);border-radius:5px;background:var(--surface)}.java-test-value>strong{font-size:11px;color:var(--muted)}#java-test-details .java-test-value pre{margin:5px 0 0}.java-test-message{white-space:pre-wrap;user-select:text}#java-test-details details>summary{cursor:pointer;color:var(--muted);padding:7px 0}
+.vscode-import-offer { max-width: min(400px, calc(100vw - 40px)); }
+.vscode-import-offer > div { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 10px; }
+#vscode-import-preview { max-height: 180px; overflow: auto; padding-left: 20px; line-height: 1.65; }

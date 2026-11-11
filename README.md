@@ -6,7 +6,7 @@ BlueGay is open source under the [MIT license](LICENSE). Third-party components 
 
 A customizable IDE with a shared Monaco interface and a Tauri 2 Windows desktop backend. A Windows release executable is available at `release/BlueGay.exe`.
 
-Version **1.0.5** adds live web preview, image/Markdown/PDF previews, reviewable error-explanation drafts, and Windows file/folder launch handling. It also includes clearer Java assertion failures, mixed-language project documentation, and ChatLGBT usability and credential-renewal fixes. Python/Java debugging, JUnit testing, Code Together, JavaScript intelligence, configurable AI code prediction, localized tools, and signed automatic update checks remain available. See [BlueGay releases](https://github.com/ReviveRC/BlueGay/releases) and [UPDATES.md](UPDATES.md) for installing, publishing, and signing future updates.
+Version **1.0.6** speeds up Code Together, adds VS Code settings import and mixed-file ZIP export, and improves ChatLGBT session renewal and usage visibility. See [BlueGay releases](https://github.com/ReviveRC/BlueGay/releases) and [UPDATES.md](UPDATES.md) for installing, publishing, and signing updates.
 
 Double-click `release/BlueGay.exe` to run it. See [BUILD.md](BUILD.md) for rebuilding and [DESKTOP.md](DESKTOP.md) for architecture, native behavior, verification, and current limits.
 
@@ -23,6 +23,10 @@ Double-click `release/BlueGay.exe` to run it. See [BUILD.md](BUILD.md) for rebui
 Run `node serve.mjs` and open `http://127.0.0.1:4173`. The browser preview uses browser storage; run the desktop executable for native disk access.
 
 Editor preferences and ChatLGBT model/personality/output settings save automatically to `%APPDATA%\app.bluegay.ide\settings.json` on Windows, in both the Node preview and desktop source. Existing browser preferences migrate on first launch. Preferences shows the actual path or any persistence error. Workspace files and recovery snapshots remain separate from settings. Restart the preview server after updating to enable the settings endpoint.
+
+Use **Preferences → Import VS Code settings** to preview and apply supported editor and file preferences from VS Code's user `settings.json`. The editor offers this import on first launch.
+
+**File → Export project as ZIP** includes the current editor text, original binary files, and empty folders.
 
 ChatLGBT supports **Continue with ChatGPT** in the Windows app, or your own OpenAI API key. Click the account at the bottom left for sign-in, saved accounts, connection choice, usage settings, and sign-out. ChatGPT mode uses eligible plan usage and account-specific models; credits depend on eligibility and credit-sharing settings. API-key mode is billed separately and is never selected automatically after a ChatGPT error. Login tokens are encrypted with Windows DPAPI; API keys use Windows Credential Manager. Browser preview supports session-only API keys.
 

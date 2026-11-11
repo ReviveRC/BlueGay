@@ -33,6 +33,11 @@ export function createAgentHandler({getKey=()=>process.env.OPENAI_API_KEY,fetchI
     res.on('close',()=>controller.abort());active.add(lane);
     try{
       const upstream=await fetchImpl('https://api.openai.com/v1/responses',{method:'POST',redirect:'error',headers:{Authorization:`Bearer ${key}`,'Content-Type':'application/json'},body:JSON.stringify(payload),signal:controller.signal});
+      for (const kind of ['requests','tokens']) {
+        const header='x-ratelimit-remaining-'+kind;
+        const value=upstream.headers?.get(header);
+        if (value && /^\d{1,15}$/.test(value)) res.setHeader(header,value);
+      }
       if(!upstream.ok){const messages={401:'The API key was rejected.',403:'This API key cannot access the requested model.',404:'Model not found. Check the model ID and account access.',429:'API rate or billing limit reached.'};json(upstream.status,{error:messages[upstream.status]||`Model service returned HTTP ${upstream.status}.`});return true;}
       res.writeHead(200,{'Content-Type':'text/event-stream','Cache-Control':'no-store','X-Accel-Buffering':'no'});
       let bytes=0;for await(const chunk of upstream.body){bytes+=chunk.length;if(bytes>4000000)throw Error('Response exceeded size limit.');if(res.destroyed)break;res.write(chunk);}

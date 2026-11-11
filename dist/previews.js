@@ -18,17 +18,19 @@ window.BlueGayPreviews=(()=>{
     window.addEventListener('bluegay-file-saved',()=>schedule());
   }
   function asset(file){return !!file&&['image','pdf'].includes(core.kind(file.path))&&state.sourceId!==file.id;}
-  async function readBytes(file){
-    if(file.disk){const result=await disk.call('read_preview_asset',{path:file.disk.path});return Uint8Array.from(atob(result.base64),c=>c.charCodeAt(0));}
-    const source=blockedFileSources.get(file.sourceId);if(source){const bytes=await source();if(bytes.length>64*1024*1024)throw Error(t('Asset exceeds the 64 MB preview limit.'));return bytes;}
+  async function readBytes(file,missingAllowed=false){
+    if(file.disk&&!file.sourceId){const result=await disk.call('read_preview_asset',{path:file.disk.path});return Uint8Array.from(atob(result.base64),c=>c.charCodeAt(0));}
+    const bytes=await readBlockedFile(file.sourceId);
+    if(bytes){if(bytes.length>64*1024*1024)throw Error(t('Asset exceeds the 64 MB preview limit.'));return bytes;}
     if(!file.unsupported)return new TextEncoder().encode(file.content);
+    if(missingAllowed)return null;
     throw Error(t('Reopen the original file to preview it.'));
   }
   function base64(bytes){let text='';for(let i=0;i<bytes.length;i+=32768)text+=String.fromCharCode(...bytes.subarray(i,i+32768));return btoa(text);}
   async function snapshot(){
     const entries=[];let total=0;
     for(const file of files){if(!core.safePath(file.path)||!core.mime(file.path))continue;
-      if(file.unsupported){if(!file.disk&&!blockedFileSources.has(file.sourceId))continue;const bytes=await readBytes(file);total+=bytes.length;entries.push({path:file.path,base64:base64(bytes)});}
+      if(file.unsupported){const bytes=await readBytes(file,true);if(!bytes)continue;total+=bytes.length;entries.push({path:file.path,base64:base64(bytes)});}
       else{total+=new TextEncoder().encode(file.content).length;entries.push({path:file.path,content:file.content});}
       if(total>64*1024*1024)throw Error(t('Preview exceeds 64 MB.'));
     }return entries;

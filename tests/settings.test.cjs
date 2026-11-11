@@ -68,3 +68,34 @@ test('settings schema includes every current editor preference',async()=>{
   const current=vm.runInNewContext('('+source.match(/const defaults=(\{[^\n]+\});/)[1]+')');
   assert.deepEqual(JSON.parse(JSON.stringify(current)),defaults.preferences);
 });
+
+test('VS Code import previews supported JSONC settings and applies them through Preferences',async()=>{
+  const harness=require('./ui-harness.cjs');
+  const h=harness();
+  h.context.settingsText=`\uFEFF{
+    // VS Code permits comments and trailing commas.
+    "editor.fontFamily": "'Cascadia Code', monospace",
+    "editor.fontSize": 18,
+    "editor.tabSize": 3,
+    "editor.insertSpaces": false,
+    "files.autoSave": "off",
+    "files.trimTrailingWhitespace": true, /* keep the old language-specific override */
+    "[python]": {"editor.tabSize": 4,},
+    "example.url": "https://example.test/a/*path*/",
+  }`;
+  h.run(`prefs.codePrediction=false;showVSCodeImport();
+    $('#vscode-settings-file').files=[{size:settingsText.length,text:async()=>settingsText}];`);
+  await h.elements.get('#vscode-settings-file').onchange();
+  assert.match(h.elements.get('#vscode-import-preview').innerHTML,/Tab size/);
+  assert.equal(h.run('prefs.tabSize'),2);
+  h.elements.get('#vscode-import-apply').onclick();
+  const prefs=JSON.parse(h.storage.get('bluegay.preferences'));
+  assert.equal(prefs.tabSize,3);
+  assert.equal(prefs.insertSpaces,false);
+  assert.equal(prefs.autoSave,false);
+  assert.equal(prefs.codePrediction,false);
+  assert.equal(prefs.fontFamily,'Cascadia Code');
+  assert.equal(prefs.fontSize,18);
+  assert.equal(prefs.trimWhitespace,true);
+  assert.equal(Object.hasOwn(prefs,'[python]'),false);
+});

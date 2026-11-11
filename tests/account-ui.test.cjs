@@ -4,8 +4,8 @@ const fs=require('node:fs');
 const vm=require('node:vm');
 const path=require('node:path');
 const harness=require('./ui-harness.cjs');
-function setup(invoke){
-  const h=harness(invoke);h.context.window.ChatLGBTCore=require('../dist/agent-core.js');
+function setup(invoke,storage){
+  const h=harness(invoke,storage);h.context.window.ChatLGBTCore=require('../dist/agent-core.js');
   for(const file of ['agent.js','account.js'])vm.runInContext(fs.readFileSync(path.join(__dirname,'../dist',file),'utf8'),h.context);
   h.run('var account=window.BlueGayAccount;saveSettingsToComputer=async()=>{};');return h;
 }
@@ -92,8 +92,36 @@ test('startup preserves an explicitly selected API connection for a signed-in us
     if(command==='chatgpt_status')return {accounts:[publicAccount],activeId:publicAccount.id,pending:false,message:''};
     if(command==='agent_status')return {configured:false};
     throw Error('Unexpected '+command);
-  });
-  h.run("chatSettings.provider='api';chatSettings.connectionSelected=true");
+  },{'bluegay.agent.settings':JSON.stringify({provider:'api',connectionSelected:true})});
   await h.run('account.restoreConnection()');assert.equal(h.run('chatSettings.provider'),'api');
   assert.equal(h.run('chat.status.configured'),false);
+});
+
+test('a temporary account read failure keeps the connected state for the next retry',async()=>{
+  let fail=false;
+  const h=setup(async()=>{
+    if (fail) throw Error('Accounts are busy in another BlueGay window.');
+    return {accounts:[publicAccount],activeId:publicAccount.id,pending:false,message:''};
+  });
+  h.run("chatSettings.provider='chatgpt';chat.ready=true;");
+  await h.run('refreshChatStatus()');
+  fail=true;
+  assert.equal(await h.run('refreshChatStatus()'),null);
+  assert.equal(h.run('chat.status.configured'),true);
+  assert.equal(h.run('account.active().id'),publicAccount.id);
+  fail=false;
+  assert.equal((await h.run('refreshChatStatus()')).configured,true);
+});
+
+test('the AI panel displays plan usage or the selected model’s last reported API limits',async()=>{
+  const h=setup(async()=>({accounts:[publicAccount],activeId:publicAccount.id,pending:false,message:''}));
+  await h.run('account.refresh()');
+  h.run("chat.ready=true;chatSettings.provider='chatgpt';chat.planLimitAccount=account.active().id;renderChatUsage()");
+  assert.equal(h.elements.get('#chat-usage-summary').textContent,'ChatGPT usage limit reached');
+  assert.equal(h.elements.get('#chat-usage-plan').hidden,false);
+  h.run("chatSettings.provider='api';updateChatApiLimits(chatSettings.model,{requests:0,tokens:1750});");
+  assert.match(h.elements.get('#chat-usage-summary').textContent,/0 requests left · 1,750 tokens left · Last API response/);
+  assert.equal(h.elements.get('#chat-usage-plan').hidden,true);
+  h.run("chatSettings.model='another-model';renderChatUsage()");
+  assert.equal(h.elements.get('#chat-usage-summary').textContent,'API balance and limits');
 });

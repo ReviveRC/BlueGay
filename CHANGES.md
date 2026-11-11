@@ -1,3 +1,10 @@
+# 1.0.6 — Faster collaboration and settings import
+
+- Code Together polls about four times per second and sends changed files to updated participants. An in-flight refresh reconciles files independently of concurrent local saves.
+- Import supported VS Code editor and file preferences from `settings.json` on first launch or from Preferences.
+- Export mixed workspaces as ZIP with original binary bytes, current editor text, and empty folders.
+- Renew the active ChatGPT session in the background and preserve the saved account through transient failures. ChatLGBT surfaces provider-reported usage limits and links to account usage and billing.
+
 # 1.0.5 — Previews, error help, and Windows launch selection
 
 - Published the project source under the MIT license with third-party notices and build instructions. Added an explicit unofficial BlueJ IDE parody and non-affiliation statement to the README, About screen, welcome screen, and release notes.

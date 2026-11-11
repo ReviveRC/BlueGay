@@ -71,7 +71,17 @@ struct Vault { host_id: String, active: Option<String>, accounts: Vec<Account> }
 #[derive(Clone, Serialize, Deserialize)]
 struct Account { client_id: String, subject: String, name: String, email: String, tokens: Option<Tokens> }
 #[derive(Clone, Serialize, Deserialize)]
-struct Tokens { access_token: String, refresh_token: String, id_token: String, scope: String, expires_at: u64, #[serde(default)] identity_pending: bool }
+struct Tokens {
+    access_token: String,
+    refresh_token: String,
+    id_token: String,
+    scope: String,
+    expires_at: u64,
+    #[serde(default)]
+    renewed_at: u64,
+    #[serde(default)]
+    identity_pending: bool,
+}
 impl Account {
     fn public(&self) -> Value { json!({"id":self.client_id,"name":self.name,"email":self.email,"signedIn":self.tokens.is_some(),"planEnabled":self.tokens.as_ref().is_some_and(|t|plan_scope(&t.scope)),"label":format!("{} · {}",if self.email.is_empty(){&self.name}else{&self.email},self.client_id.chars().rev().take(6).collect::<String>().chars().rev().collect::<String>())}) }
 }
@@ -117,7 +127,8 @@ fn tokens(value:&Value,previous:Option<&Tokens>)->Result<Tokens,String>{
     let access=value["access_token"].as_str().filter(|v|!v.is_empty()).ok_or("No access token returned.")?;
     let expires=value["expires_in"].as_u64().filter(|s|*s>0&&*s<=86400).ok_or("Invalid token expiration.")?;
     let scope=value["scope"].as_str().or_else(||previous.map(|p|p.scope.as_str())).ok_or("No granted permissions returned.")?;
-    Ok(Tokens{access_token:access.into(),refresh_token:value["refresh_token"].as_str().filter(|s|!s.is_empty()).or_else(||previous.map(|p|p.refresh_token.as_str())).unwrap_or("").into(),id_token:value["id_token"].as_str().or_else(||previous.map(|p|p.id_token.as_str())).unwrap_or("").into(),scope:scope.into(),expires_at:now()+expires,identity_pending:previous.is_some_and(|p|p.identity_pending||value["id_token"].is_string())})
+    let renewed_at = now();
+    Ok(Tokens{access_token:access.into(),refresh_token:value["refresh_token"].as_str().filter(|s|!s.is_empty()).or_else(||previous.map(|p|p.refresh_token.as_str())).unwrap_or("").into(),id_token:value["id_token"].as_str().or_else(||previous.map(|p|p.id_token.as_str())).unwrap_or("").into(),scope:scope.into(),expires_at:renewed_at+expires,renewed_at,identity_pending:previous.is_some_and(|p|p.identity_pending||value["id_token"].is_string())})
 }
 
 struct Attempt {state:String,nonce:String,verifier:String,redirect:String,existing:Option<Account>}
@@ -220,25 +231,37 @@ pub async fn chatgpt_select(account_id:String,state:tauri::State<'_,ChatGptState
 }
 
 pub async fn access(state:&ChatGptState,account_id:&str)->Result<String,String>{
-    access_with(state,account_id,|old|async move {
+    access_after_rejection(state,account_id,None).await
+}
+
+pub async fn access_after_rejection(state:&ChatGptState,account_id:&str,rejected:Option<&str>)->Result<String,String>{
+    access_with(state,account_id,rejected,|old|async move {
         let response=client()?.post(TOKEN).form(&[("grant_type","refresh_token"),("client_id",account_id),("refresh_token",old.refresh_token.as_str()),("resource",RESOURCE)]).send().await.map_err(|_|"Could not renew ChatGPT access. Check your connection and retry.")?;
-        Ok((response.status().is_success(),bounded_json(response).await?))
+        Ok((response.status().as_u16(),bounded_json(response).await?))
     },|token|async move {Ok(identity(&client()?,&token,account_id,None).await?.sub)}).await
 }
 
-async fn access_with<R,RF,V,VF>(state:&ChatGptState,account_id:&str,refresh:R,verify:V)->Result<String,String>
-where R:FnOnce(Tokens)->RF,RF:std::future::Future<Output=Result<(bool,Value),String>>,V:FnOnce(String)->VF,VF:std::future::Future<Output=Result<String,String>> {
+async fn access_with<R,RF,V,VF>(state:&ChatGptState,account_id:&str,rejected:Option<&str>,refresh:R,verify:V)->Result<String,String>
+where R:FnOnce(Tokens)->RF,RF:std::future::Future<Output=Result<(u16,Value),String>>,V:FnOnce(String)->VF,VF:std::future::Future<Output=Result<String,String>> {
     let _gate=state.gate.lock().await;let _file=state.lock_file()?;let mut vault=state.read()?;
     if vault.active.as_deref()!=Some(account_id){return Err("Your ChatGPT account changed. Review Account settings and send again.".into())}
     let index=vault.accounts.iter().position(|a|a.client_id==account_id).ok_or("Sign in with ChatGPT first.")?;
     let old=vault.accounts[index].tokens.as_ref().ok_or("Sign in with ChatGPT again.")?.clone();
     if !plan_scope(&old.scope){return Err("Enable ChatGPT plan usage in Account settings, or explicitly choose API-key billing.".into())}
-    if old.expires_at<=now()+60 {
-        if old.refresh_token.is_empty(){return Err("Your session expired. Sign in with ChatGPT again.".into())}
-        let (success,value)=refresh(old.clone()).await?;
-        if !success {
+    if old.expires_at<=now()+60 || rejected==Some(old.access_token.as_str()) {
+        let ended = "Your ChatGPT session ended. Sign in again in Account settings.";
+        if old.refresh_token.is_empty() && old.expires_at>now() {
+            return Err("ChatGPT did not accept this session. Check Account settings.".into());
+        }
+        let (status,value) = if old.refresh_token.is_empty() { (400,json!({"error":"invalid_refresh_token"})) } else { refresh(old.clone()).await? };
+        if !(200..300).contains(&status) {
             let error=value["error"].as_str().or(value["error"]["code"].as_str()).unwrap_or("");
-            if ["invalid_grant","invalid_refresh_token","token_expired","refresh_token_expired","refresh_token_invalidated","refresh_token_reused"].contains(&error){vault.accounts[index].tokens=None;state.write(&vault)?;return Err("Your ChatGPT session ended. Sign in again in Account settings.".into())}
+            if matches!(status,400|401) && ["invalid_grant","invalid_refresh_token","token_expired","refresh_token_expired","refresh_token_invalidated","refresh_token_reused"].contains(&error) {
+                vault.accounts[index].tokens=None;
+                state.write(&vault)?;
+                *state.message.lock().map_err(|_| "Account state unavailable.")?=ended.into();
+                return Err(ended.into());
+            }
             return Err("ChatGPT access could not be renewed. Your account is preserved; retry later.".into())
         }
         // Rotation consumes the old refresh token. Persist its replacement before
@@ -254,10 +277,44 @@ where R:FnOnce(Tokens)->RF,RF:std::future::Future<Output=Result<(bool,Value),Str
     if !plan_scope(&next.scope){return Err("ChatGPT plan permission is no longer enabled. Open Account settings.".into())}Ok(next.access_token.clone())
 }
 
+async fn session_due_for_renewal(state:&ChatGptState)->Result<Option<String>,String> {
+    let _gate=state.gate.lock().await;
+    let _file=state.lock_file()?;
+    let vault=state.read()?;
+    let active=vault.accounts.iter().find(|account| Some(account.client_id.as_str())==vault.active.as_deref());
+    let time=now();
+    Ok(active.filter(|account|account.tokens.as_ref().is_some_and(|token|
+        plan_scope(&token.scope) && token.expires_at<=time &&
+        time.saturating_sub(token.renewed_at)>=7*24*60*60
+    )).map(|account|account.client_id.clone()))
+}
+
+pub fn maintain_session(app:tauri::AppHandle) {
+    use tauri::Emitter;
+    tauri::async_runtime::spawn(async move {
+        let mut checks=tokio::time::interval(Duration::from_secs(15*60));
+        checks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            checks.tick().await;
+            let state=app.state::<ChatGptState>();
+            if let Ok(Some(id))=session_due_for_renewal(&state).await {
+                let _=access(&state,&id).await;
+                let _=app.emit("bluegay-chatgpt-session", ());
+            }
+        }
+    });
+}
+
 #[tauri::command]
 pub async fn chatgpt_models(account_id:String,state:tauri::State<'_,ChatGptState>)->Result<Value,String>{
-    let token=access(&state,&account_id).await?;
-    let response=client()?.get(format!("{RESOURCE}/models")).bearer_auth(&token).send().await.map_err(|_|"Cannot load ChatGPT models. Check your connection.")?;
+    let mut token=access(&state,&account_id).await?;
+    let http=client()?;
+    let load=|token:&str| http.get(format!("{RESOURCE}/models")).bearer_auth(token).send();
+    let mut response=load(&token).await.map_err(|_|"Cannot load ChatGPT models. Check your connection.")?;
+    if response.status()==reqwest::StatusCode::UNAUTHORIZED {
+        token=access_after_rejection(&state,&account_id,Some(&token)).await?;
+        response=load(&token).await.map_err(|_|"Cannot load ChatGPT models. Check your connection.")?;
+    }
     if !response.status().is_success(){return Err(provider_error(response,&token).await)}
     let value=bounded_json(response).await?;let models=value["models"].as_array().ok_or("ChatGPT returned an unexpected model catalog.")?;
     let list:Vec<Value>=models.iter().filter(|m|m["visibility"]=="list").filter_map(|m|{let id=m["slug"].as_str()?;if id.is_empty()||id.len()>100||!id.bytes().all(|c|c.is_ascii_alphanumeric()||b"._:-".contains(&c)){return None}Some(json!({"id":id,"label":m["display_name"].as_str().unwrap_or(id)}))}).collect();
@@ -297,7 +354,7 @@ pub async fn chatgpt_logout(account_id:String,state:tauri::State<'_,ChatGptState
 mod tests {
     use super::*;
     fn attempt(existing:Option<Account>)->Attempt{Attempt{state:"state-value".into(),nonce:"nonce-value".into(),verifier:"pkce-verifier".into(),redirect:"http://127.0.0.1:1455/auth/callback".into(),existing}}
-    fn account()->Account{Account{client_id:"oaiapp_test".into(),subject:"test-subject".into(),name:"Student".into(),email:"student@example.test".into(),tokens:Some(Tokens{access_token:"secret-access".into(),refresh_token:"secret-refresh".into(),id_token:"secret-id".into(),scope:SCOPES.into(),expires_at:now()+3600,identity_pending:false})}}
+    fn account()->Account{Account{client_id:"oaiapp_test".into(),subject:"test-subject".into(),name:"Student".into(),email:"student@example.test".into(),tokens:Some(Tokens{access_token:"secret-access".into(),refresh_token:"secret-refresh".into(),id_token:"secret-id".into(),scope:SCOPES.into(),expires_at:now()+3600,renewed_at:now(),identity_pending:false})}}
     #[test]
     fn signed_identity_rejects_forgery_and_invalid_claims(){
         let fixture:Value=serde_json::from_str(include_str!("../../tests/chatgpt-identity-fixture.json")).unwrap();
@@ -345,26 +402,39 @@ mod tests {
     #[tokio::test]
     async fn rotated_credentials_survive_identity_network_failure_and_retry_without_refresh(){
         let temp=tempfile::tempdir().unwrap();let state=ChatGptState::new(temp.path().join("account.dpapi"));expired_vault(&state);
-        let error=access_with(&state,"oaiapp_test",|old|async move {assert_eq!(old.refresh_token,"secret-refresh");Ok((true,rotated()))},|_|async {Err("Identity keys are unavailable.".into())}).await.unwrap_err();
+        let error=access_with(&state,"oaiapp_test",None,|old|async move {assert_eq!(old.refresh_token,"secret-refresh");Ok((200,rotated()))},|_|async {Err("Identity keys are unavailable.".into())}).await.unwrap_err();
         assert!(error.contains("Identity keys"));
         let saved=state.read().unwrap().accounts[0].tokens.clone().unwrap();assert_eq!(saved.refresh_token,"replacement-refresh");assert!(saved.identity_pending);
         // A fresh app instance must validate the saved identity, without reusing
         // the already-consumed refresh token or releasing unverified access.
         let reopened=ChatGptState::new(state.path.clone());
-        assert!(access_with(&reopened,"oaiapp_test",|_|async {panic!("must not refresh")},|_|async {Ok("different-subject".into())}).await.is_err());
+        assert!(access_with(&reopened,"oaiapp_test",None,|_|async {panic!("must not refresh")},|_|async {Ok("different-subject".into())}).await.is_err());
         assert!(reopened.read().unwrap().accounts[0].tokens.as_ref().unwrap().identity_pending);
-        let token=access_with(&reopened,"oaiapp_test",|_|async {panic!("must not refresh")},|id|async move {assert_eq!(id,"replacement-id");Ok("test-subject".into())}).await.unwrap();
+        let token=access_with(&reopened,"oaiapp_test",None,|_|async {panic!("must not refresh")},|id|async move {assert_eq!(id,"replacement-id");Ok("test-subject".into())}).await.unwrap();
         assert_eq!(token,"replacement-access");assert!(!reopened.read().unwrap().accounts[0].tokens.as_ref().unwrap().identity_pending);
     }
     #[tokio::test]
     async fn refresh_preserves_credentials_on_transient_errors_but_clears_terminal_errors(){
         let temp=tempfile::tempdir().unwrap();let state=ChatGptState::new(temp.path().join("account.dpapi"));expired_vault(&state);
-        for code in ["temporarily_unavailable","invalid_client"]{
-            assert!(access_with(&state,"oaiapp_test",|_|async move {Ok((false,json!({"error":code})))},|_|async {panic!("must not verify")}).await.is_err());
+        for (status,code) in [(503,"invalid_grant"),(400,"temporarily_unavailable"),(400,"invalid_client")]{
+            assert!(access_with(&state,"oaiapp_test",None,|_|async move {Ok((status,json!({"error":code})))},|_|async {panic!("must not verify")}).await.is_err());
             assert_eq!(state.read().unwrap().accounts[0].tokens.as_ref().unwrap().refresh_token,"secret-refresh");
         }
-        assert!(access_with(&state,"oaiapp_test",|_|async {Ok((false,json!({"error":{"code":"refresh_token_reused"}})))},|_|async {panic!("must not verify")}).await.is_err());
+        assert!(access_with(&state,"oaiapp_test",None,|_|async {Ok((400,json!({"error":{"code":"refresh_token_reused"}})))},|_|async {panic!("must not verify")}).await.is_err());
         assert!(state.read().unwrap().accounts[0].tokens.is_none());
+    }
+    #[tokio::test]
+    async fn rejected_access_rotates_once_and_a_concurrent_request_reuses_the_replacement() {
+        let temp=tempfile::tempdir().unwrap();
+        let state=ChatGptState::new(temp.path().join("account.dpapi"));
+        let account=account();
+        state.write(&Vault {host_id:"host".into(),active:Some(account.client_id.clone()),accounts:vec![account]}).unwrap();
+        let renew=access_with(&state,"oaiapp_test",Some("secret-access"),|_|async {Ok((200,rotated()))},
+            |_|async {Ok("test-subject".into())}).await.unwrap();
+        let reused=access_with(&state,"oaiapp_test",Some("secret-access"),|_|async {panic!("replacement is already saved")},
+            |_|async {panic!("replacement is already verified")}).await.unwrap();
+        assert_eq!(renew,"replacement-access");
+        assert_eq!(renew,reused);
     }
     #[test]
     fn older_saved_tokens_load_and_rotation_keeps_pending_identity_checks(){

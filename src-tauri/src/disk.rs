@@ -1,13 +1,14 @@
 //! Native disk boundary. Webview paths are never trusted: only files/folders
 //! selected through native dialogs or OS file drops (and their persisted grants) are accessible.
 use serde::{Deserialize, Serialize};
+use base64::{engine::general_purpose::STANDARD, Engine};
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
-    io::{Read, Write},
+    io::{Read, Seek, SeekFrom, Write},
     path::{Component, Path, PathBuf},
-    sync::Mutex,
+    sync::{Mutex, atomic::{AtomicU64, Ordering}},
 };
 use tauri::{Manager, State};
 
@@ -40,6 +41,7 @@ pub struct DiskState {
     grants: Mutex<Grants>,
     // Serializes app writes, rename, and trash so overlapping saves cannot race.
     writes: Mutex<()>,
+    revision: AtomicU64,
     pending_drops: Mutex<BTreeMap<String, Vec<PathBuf>>>,
     config: PathBuf,
 }
@@ -47,7 +49,10 @@ impl DiskState {
     pub fn load(config: PathBuf) -> Self {
         let grants = fs::read(config.join("file-access.json"))
             .ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
-        Self { grants: Mutex::new(grants), writes: Mutex::new(()), pending_drops: Mutex::new(BTreeMap::new()), config }
+        Self { grants: Mutex::new(grants), writes: Mutex::new(()), revision: AtomicU64::new(0), pending_drops: Mutex::new(BTreeMap::new()), config }
+    }
+    fn invalidate_workspace(&self) {
+        self.revision.fetch_add(1, Ordering::Relaxed);
     }
     // Only the native OS drop callback can enqueue paths. IPC accepts a single-use
     // ticket, never arbitrary paths that could grant access to unrelated files.
@@ -368,6 +373,7 @@ fn write_checked_with_override(state: &DiskState, path: &Path, content: String, 
     if current != expected_version { return Err(error("conflict", "The file changed on disk. Review it before saving.")); }
     if content.len() as u64 > FILE_LIMIT && !force_open { return Err(error("size", "This file exceeds 50 MB. Choose Open anyway to allow large-file editing.")); }
     if let Some(parent) = path.parent() { fs::create_dir_all(parent).map_err(io)?; }
+    state.invalidate_workspace();
     atomic_write(path, content.as_bytes())?;
     if force_open {read_anyway(path,None)} else {read(path, None)}
 }
@@ -394,6 +400,7 @@ pub async fn save_document_as(state: State<'_, DiskState>, suggested_name: Strin
 #[tauri::command]
 pub fn create_folder(state: State<'_, DiskState>, path: String) -> Result<()> {
     let _write = state.writes.lock().map_err(|_| error("state", "Disk state unavailable"))?;
+    state.invalidate_workspace();
     fs::create_dir_all(state.authorize(&path)?).map_err(io)
 }
 
@@ -404,6 +411,7 @@ pub fn rename_document(state: State<'_, DiskState>, path: String, destination: S
     let target = state.authorize(&destination)?;
     if target.exists() { return Err(error("exists", "A file already exists at that path.")); }
     if !version_matches(&source,&expected_version)? { return Err(error("conflict", "The original file changed on disk.")); }
+    state.invalidate_workspace();
     if let Some(parent) = target.parent() { fs::create_dir_all(parent).map_err(io)?; }
     // persist_noclobber never overwrites a file that appears after the check.
     let mut temp = tempfile::NamedTempFile::new_in(target.parent().unwrap()).map_err(io)?;
@@ -422,6 +430,7 @@ pub fn trash_document(state: State<'_, DiskState>, path: String, expected_versio
     let _write = state.writes.lock().map_err(|_| error("state", "Disk state unavailable"))?;
     let target = state.authorize(&path)?;
     if !version_matches(&target,&expected_version)? { return Err(error("conflict", "The file changed on disk. Reload it before deleting.")); }
+    state.invalidate_workspace();
     trash::delete(target).map_err(|e| error("io", e))
 }
 
@@ -440,17 +449,71 @@ pub fn trash_folder(state: State<'_, DiskState>, root: String, path: String) -> 
     let _write = state.writes.lock().map_err(|_| error("state", "Disk state unavailable"))?;
     let target = folder_target(&state, &root, &path)?;
     if !target.exists() { return Ok(()); } // An unsaved folder or one already removed externally.
+    state.invalidate_workspace();
     trash::delete(target).map_err(|e| error("io", e))
 }
 
 #[tauri::command]
 pub async fn export_bytes(suggested_name: String, bytes: Vec<u8>) -> Result<bool> {
-    let name = Path::new(&suggested_name).file_name().unwrap_or_default().to_string_lossy().into_owned();
-    let selection = tauri::async_runtime::spawn_blocking(move || rfd::FileDialog::new().set_title("Export from BlueGay").set_file_name(name).save_file())
-        .await.map_err(|e| error("dialog", e))?;
+    tauri::async_runtime::spawn_blocking(move || save_export(&suggested_name, &bytes))
+        .await.map_err(|e| error("dialog", e))?
+}
+
+fn save_export(suggested_name: &str, bytes: &[u8]) -> Result<bool> {
+    let name = Path::new(suggested_name).file_name().unwrap_or_default().to_string_lossy().into_owned();
+    let selection = rfd::FileDialog::new().set_title("Export from BlueGay").set_file_name(name).save_file();
     let Some(selected) = selection else { return Ok(false) };
-    atomic_write(&resolved_target(&selected)?, &bytes)?;
+    atomic_write(&resolved_target(&selected)?, bytes)?;
     Ok(true)
+}
+
+#[tauri::command]
+pub async fn export_archive(request: tauri::ipc::Request<'_>) -> Result<bool> {
+    let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else { return Err(error("request", "Invalid ZIP data.")); };
+    let bytes = bytes.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        // A NUL-terminated UTF-8 filename precedes the ZIP bytes in the raw IPC body.
+        let separator = bytes.iter().take(4096).position(|&byte| byte == 0).ok_or_else(|| error("request", "Missing ZIP filename."))?;
+        let name = std::str::from_utf8(&bytes[..separator]).map_err(|_| error("request", "Invalid ZIP filename."))?;
+        save_export(name, &bytes[separator + 1..])
+    }).await.map_err(|e| error("dialog", e))?
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArchiveChunk {
+    base64: String,
+    version: String,
+    size: u64,
+}
+
+fn archive_chunk(path: &Path, offset: u64, expected: Option<&str>) -> Result<ArchiveChunk> {
+    let mut file = fs::File::open(path).map_err(io)?;
+    let metadata = file.metadata().map_err(io)?;
+    let size = metadata.len();
+    if !metadata.is_file() { return Err(error("unsupported", "Only regular files can be exported.")); }
+    if size >= u32::MAX as u64 { return Err(error("size", "This file exceeds the ZIP export limit.")); }
+    let modified = metadata.modified().map_err(io)?;
+    let version = format!("{size}:{modified:?}");
+    if expected.is_some_and(|expected| expected != version) || offset > size {
+        return Err(error("conflict", "The file changed during export. Try exporting again."));
+    }
+    file.seek(SeekFrom::Start(offset)).map_err(io)?;
+    let mut bytes = vec![0; (size - offset).min(1024 * 1024) as usize];
+    file.read_exact(&mut bytes).map_err(io)?;
+    let after = file.metadata().map_err(io)?;
+    if after.len() != size || after.modified().map_err(io)? != modified {
+        return Err(error("conflict", "The file changed during export. Try exporting again."));
+    }
+    Ok(ArchiveChunk { base64: STANDARD.encode(bytes), version, size })
+}
+
+#[tauri::command]
+pub async fn read_archive_chunk(app: tauri::AppHandle, path: String, offset: u64, version: Option<String>) -> Result<ArchiveChunk> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let path = app.state::<DiskState>().authorize(&path)?;
+        archive_chunk(&path, offset, version.as_deref())
+    }).await.map_err(|e| error("state", e))?
 }
 
 #[cfg(test)]

@@ -3,7 +3,7 @@
 use super::*;
 use serde_json::{json, Value};
 use std::{net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream, UdpSocket},
-    sync::{Arc, atomic::{AtomicBool, Ordering}}, thread, time::{Duration, Instant}};
+    sync::{Arc, RwLock, atomic::{AtomicBool, AtomicUsize, Ordering}}, thread, time::{Duration, Instant}};
 use tauri::Manager;
 
 // JSON can expand a UTF-8 control byte to six ASCII bytes (\u00XX).
@@ -19,9 +19,15 @@ struct Host {
     root: PathBuf,
     token: String,
     stopped: AtomicBool,
-    permissions: Mutex<Permissions>,
+    permissions: RwLock<Permissions>,
+    snapshot: Mutex<Option<CachedWorkspace>>,
     members: Mutex<std::collections::BTreeMap<String, (Instant, Value)>>,
     debugger:crate::debugger::DebuggerState,
+}
+struct CachedWorkspace {
+    revision: u64,
+    scanned: Instant,
+    workspace: Workspace,
 }
 #[derive(Default)]
 pub struct TogetherState { host: Mutex<Option<Arc<Host>>> }
@@ -52,17 +58,39 @@ fn require(allowed: bool) -> Result<()> {
     if allowed { Ok(()) } else { Err(error("permission", "The host has not granted permission for this operation.")) }
 }
 
+fn snapshot_workspace(state: &DiskState, host: &Host, known: Option<&serde_json::Map<String, Value>>) -> Result<Value> {
+    let mut cached = host.snapshot.lock().map_err(|_| error("state", "Session unavailable"))?;
+    let _write = state.writes.lock().map_err(|_| error("state", "Disk state unavailable"))?;
+    let revision = state.revision.load(Ordering::Relaxed);
+    if cached.as_ref().is_none_or(|snapshot| snapshot.revision != revision || snapshot.scanned.elapsed() >= Duration::from_secs(1)) {
+        let root = &host.root;
+        let mut workspace = Workspace {root:"together".into(), name:root.file_name().unwrap_or_default().to_string_lossy().into(), files:vec![], folders:vec![], skipped:0};
+        walk(root, root, &mut workspace, &mut 0)?;
+        workspace.files = workspace.files.into_iter().map(|doc| remote_document(doc, root)).collect();
+        *cached = Some(CachedWorkspace { revision, scanned: Instant::now(), workspace });
+    }
+    drop(_write);
+    let workspace = &cached.as_ref().unwrap().workspace;
+    let Some(known) = known else { return Ok(json!(workspace)); };
+    let changed: Vec<_> = workspace.files.iter().filter(|doc| {
+        known.get(&doc.path).and_then(Value::as_str) != Some(doc.version.as_str())
+    }).collect();
+    let paths: BTreeSet<_> = workspace.files.iter().map(|doc| doc.path.as_str()).collect();
+    let removed: Vec<_> = if workspace.skipped == 0 {
+        known.keys().filter(|path| !paths.contains(path.as_str())).collect()
+    } else { vec![] };
+    Ok(json!({"root":workspace.root,"name":workspace.name,"files":changed,
+        "folders":workspace.folders,"skipped":workspace.skipped,"removed":removed}))
+}
+
 fn dispatch(state: &DiskState, host: &Host, operation: &str, args: &Value) -> Result<Value> {
     // Hold permissions until completion: revocation/stop waits for in-flight work.
-    let permissions = host.permissions.lock().map_err(|_| error("state", "Session unavailable"))?;
+    let permissions = host.permissions.read().map_err(|_| error("state", "Session unavailable"))?;
     if host.stopped.load(Ordering::SeqCst) { return Err(error("disconnected", "The host ended this session.")); }
     let root = &host.root;
     if operation == "snapshot" {
         let presence = update_presence(host, &args["presence"])?;
-        let _write = state.writes.lock().map_err(|_| error("state", "Disk state unavailable"))?;
-        let mut workspace = Workspace {root:"together".into(), name:root.file_name().unwrap_or_default().to_string_lossy().into(), files:vec![],folders:vec![],skipped:0};
-        walk(root, root, &mut workspace, &mut 0)?;
-        workspace.files = workspace.files.into_iter().map(|d|remote_document(d, root)).collect();
+        let workspace = snapshot_workspace(state, host, args["known"].as_object())?;
         return Ok(json!({"workspace":workspace,"permissions":*permissions,"presence":presence}));
     }
     if operation == "leave" {
@@ -79,6 +107,10 @@ fn dispatch(state: &DiskState, host: &Host, operation: &str, args: &Value) -> Re
         return host.debugger.dispatch(operation,&args["args"],Some(root),&format!("guest:{id}")).map_err(|e|error("debugger",e));
     }
     let path = target(root, field(args, "path")?)?;
+    if operation == "read_archive_chunk" {
+        let offset = args["offset"].as_u64().ok_or_else(|| error("request", "Invalid archive offset."))?;
+        return Ok(json!(archive_chunk(&path, offset, args["version"].as_str())?));
+    }
     if operation == "read_document" {
         let document=if args["forceOpen"].as_bool().unwrap_or(false){read_anyway(&path,Some(root))?}else{entry_document(&path,Some(root))?};
         return Ok(json!(remote_document(document,root)));
@@ -91,6 +123,7 @@ fn dispatch(state: &DiskState, host: &Host, operation: &str, args: &Value) -> Re
     }
     require(permissions.create_delete)?;
     let _write = state.writes.lock().map_err(|_| error("state", "Disk state unavailable"))?;
+    state.invalidate_workspace();
     match operation {
         "create_folder" => { fs::create_dir_all(path).map_err(io)?; Ok(Value::Null) }
         "trash_document" => {
@@ -162,6 +195,7 @@ fn serve_connection(mut stream: TcpStream, state: &DiskState, host: &Host) -> Re
     // framed protocol uses read_exact/write_all with timeouts, so each accepted
     // connection must be blocking even though the accept loop is nonblocking.
     stream.set_nonblocking(false).map_err(io)?;
+    stream.set_nodelay(true).map_err(io)?;
     stream.set_read_timeout(Some(Duration::from_secs(3))).map_err(io)?;
     stream.set_write_timeout(Some(Duration::from_secs(5))).map_err(io)?;
     // Authenticate before reading/allocating the JSON payload.
@@ -193,13 +227,22 @@ pub fn together_start(app: tauri::AppHandle, state: State<'_, TogetherState>, di
     let mut bytes = [0;32]; getrandom::fill(&mut bytes).map_err(|e|error("state",e))?;
     let token: String = bytes.iter().map(|b|format!("{b:02x}")).collect();
     let code = format!("BG1-{address}-{port}-{token}");
-    let host = Arc::new(Host {root, token, stopped:AtomicBool::new(false),permissions:Mutex::new(permissions),members:Mutex::new(Default::default()),debugger:app.state::<crate::debugger::DebuggerState>().inner().clone()});
+    let host = Arc::new(Host {root, token, stopped:AtomicBool::new(false),permissions:RwLock::new(permissions),snapshot:Mutex::new(None),members:Mutex::new(Default::default()),debugger:app.state::<crate::debugger::DebuggerState>().inner().clone()});
     *current = Some(host.clone());
     thread::spawn(move || {
+        let active = Arc::new(AtomicUsize::new(0));
         while !host.stopped.load(Ordering::SeqCst) {
             match listener.accept() {
-                Ok((stream,_)) => { let disk = app.state::<DiskState>(); let _ = serve_connection(stream,&disk,&host); }
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => thread::sleep(Duration::from_millis(40)),
+                Ok((stream,_)) => {
+                    if active.load(Ordering::Relaxed) >= 64 { continue; }
+                    active.fetch_add(1, Ordering::Relaxed);
+                    let (app, host, worker_count) = (app.clone(), host.clone(), active.clone());
+                    if thread::Builder::new().spawn(move || {
+                        let _ = serve_connection(stream, &app.state::<DiskState>(), &host);
+                        worker_count.fetch_sub(1, Ordering::Relaxed);
+                    }).is_err() { active.fetch_sub(1, Ordering::Relaxed); }
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => thread::sleep(Duration::from_millis(5)),
                 Err(_) => break,
             }
         }
@@ -211,7 +254,7 @@ pub fn together_start(app: tauri::AppHandle, state: State<'_, TogetherState>, di
 pub fn together_stop(state: State<'_, TogetherState>) -> Result<()> {
     let mut current = state.host.lock().map_err(|_|error("state","Session unavailable"))?;
     if let Some(host) = current.take() {
-        let _permissions = host.permissions.lock().map_err(|_|error("state","Session unavailable"))?;
+        let _permissions = host.permissions.write().map_err(|_|error("state","Session unavailable"))?;
         host.stopped.store(true,Ordering::SeqCst);
         host.debugger.stop_guests(&host.root);
     }
@@ -221,16 +264,20 @@ pub fn together_stop(state: State<'_, TogetherState>) -> Result<()> {
 pub fn together_permissions(state: State<'_, TogetherState>, permissions: Permissions) -> Result<()> {
     let current = state.host.lock().map_err(|_|error("state","Session unavailable"))?;
     let host = current.as_ref().ok_or_else(||error("state","No active session"))?;
-    *host.permissions.lock().map_err(|_|error("state","Session unavailable"))? = permissions;
+    let mut current_permissions = host.permissions.write().map_err(|_|error("state","Session unavailable"))?;
+    *current_permissions = permissions;
     if !permissions.console{host.debugger.stop_guests(&host.root);}
     Ok(())
 }
 
 #[tauri::command]
-pub fn together_host_poll(state: State<'_, TogetherState>, disk: State<'_, DiskState>, presence: Value) -> Result<Value> {
-    let current = state.host.lock().map_err(|_|error("state","Session unavailable"))?;
-    let host = current.as_ref().ok_or_else(||error("state","No active session"))?;
-    dispatch(&disk,host,"snapshot",&json!({"presence":presence}))
+pub async fn together_host_poll(app: tauri::AppHandle, presence: Value, known: Option<Value>) -> Result<Value> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<TogetherState>();
+        let host = state.host.lock().map_err(|_|error("state","Session unavailable"))?
+            .clone().ok_or_else(||error("state","No active session"))?;
+        dispatch(&app.state::<DiskState>(), &host, "snapshot", &json!({"presence":presence,"known":known}))
+    }).await.map_err(|e| error("state", e))?
 }
 
 fn parse_code(code: &str) -> Result<(SocketAddr, &str)> {
@@ -244,6 +291,7 @@ fn parse_code(code: &str) -> Result<(SocketAddr, &str)> {
 fn request(code: &str, operation: &str, args: &Value) -> Result<Value> {
     let (address,token) = parse_code(code)?;
     let mut stream = TcpStream::connect_timeout(&address,Duration::from_secs(4)).map_err(|_|error("disconnected","Cannot reach the host. Check that the session is running, both computers share a network/VPN, and the host firewall permits BlueGay."))?;
+    stream.set_nodelay(true).map_err(io)?;
     stream.set_read_timeout(Some(Duration::from_secs(8))).map_err(io)?;
     stream.set_write_timeout(Some(Duration::from_secs(5))).map_err(io)?;
     stream.write_all(token.as_bytes()).map_err(io)?;
@@ -270,7 +318,7 @@ mod tests {
         let args=json!({"id":"guest","operation":"open","args":{}});
         assert_eq!(dispatch(&state,&host,"debugger",&args).unwrap_err().code,"permission");
         assert_eq!(dispatch(&state,&host,"debugger",&json!({"id":"guest","operation":"tests","args":{}})).unwrap_err().code,"permission");
-        host.permissions.lock().unwrap().console=true;
+        host.permissions.write().unwrap().console=true;
         assert_eq!(dispatch(&state,&host,"debugger",&args).unwrap_err().code,"permission");
         update_presence(&host,&json!({"id":"guest","name":"Guest"})).unwrap();
         assert_eq!(dispatch(&state,&host,"debugger",&json!({"id":"guest","operation":"install","args":{"language":"java"}})).unwrap_err().code,"permission");
@@ -281,7 +329,7 @@ mod tests {
         let root = fs::canonicalize(temp.path()).unwrap();
         fs::write(root.join("index.html"),"original").unwrap();
         let state = DiskState::load(root.join("config"));
-        let host = Host {root,token:"a".repeat(64),stopped:AtomicBool::new(false),permissions:Mutex::new(Permissions {write:false,create_delete:false,console:false}),members:Mutex::new(Default::default()),debugger:crate::debugger::DebuggerState::new(state.config.join("debugger"))};
+        let host = Host {root,token:"a".repeat(64),stopped:AtomicBool::new(false),permissions:RwLock::new(Permissions {write:false,create_delete:false,console:false}),snapshot:Mutex::new(None),members:Mutex::new(Default::default()),debugger:crate::debugger::DebuggerState::new(state.config.join("debugger"))};
         (temp,state,host)
     }
     #[test]
@@ -290,14 +338,14 @@ mod tests {
         let doc = dispatch(&state,&host,"read_document",&json!({"path":"index.html"})).unwrap();
         let edit = json!({"path":"index.html","content":"edited","expectedVersion":doc["version"]});
         assert_eq!(dispatch(&state,&host,"save_document",&edit).unwrap_err().code,"permission");
-        host.permissions.lock().unwrap().write=true;
+        host.permissions.write().unwrap().write=true;
         dispatch(&state,&host,"save_document",&edit).unwrap();
         assert_eq!(dispatch(&state,&host,"save_document",&edit).unwrap_err().code,"conflict");
         assert_eq!(dispatch(&state,&host,"save_document",&json!({"path":"new.txt","content":"new","expectedVersion":null})).unwrap_err().code,"permission");
         for operation in ["create_folder","trash_document","trash_folder","rename_document"] {
             assert_eq!(dispatch(&state,&host,operation,&json!({"path":"index.html"})).unwrap_err().code,"permission");
         }
-        host.permissions.lock().unwrap().create_delete=true;
+        host.permissions.write().unwrap().create_delete=true;
         assert!(dispatch(&state,&host,"save_document",&json!({"path":"nested/new.txt","content":"new","expectedVersion":null})).is_ok());
         host.stopped.store(true,Ordering::SeqCst);
         assert_eq!(dispatch(&state,&host,"snapshot",&json!({})).unwrap_err().code,"disconnected");
@@ -316,7 +364,7 @@ mod tests {
     #[test]
     fn two_clients_share_a_real_socket_and_stale_edits_cannot_clobber() {
         let (_temp,state,host) = fixture();
-        host.permissions.lock().unwrap().write=true;
+        host.permissions.write().unwrap().write=true;
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let code = format!("BG1-127.0.0.1-{}-{}",listener.local_addr().unwrap().port(),host.token);
         let server = thread::spawn(move||{for _ in 0..4 {let (stream,_) = listener.accept().unwrap();serve_connection(stream,&state,&host).unwrap();}});
@@ -325,6 +373,27 @@ mod tests {
         request(&code,"save_document",&json!({"path":"index.html","content":"first edit","expectedVersion":first["version"]})).unwrap();
         assert_eq!(request(&code,"save_document",&json!({"path":"index.html","content":"second edit","expectedVersion":second["version"]})).unwrap_err().code,"conflict");
         server.join().unwrap();
+    }
+    #[test]
+    fn snapshots_send_changed_files_and_invalidate_after_shared_writes() {
+        let (_temp, state, host) = fixture();
+        fs::write(host.root.join("keep.txt"), "untouched").unwrap();
+        host.permissions.write().unwrap().write = true;
+        let first = dispatch(&state, &host, "snapshot", &json!({})).unwrap();
+        let mut known = serde_json::Map::new();
+        for file in first["workspace"]["files"].as_array().unwrap() {
+            known.insert(file["path"].as_str().unwrap().into(), file["version"].clone());
+        }
+        let unchanged = dispatch(&state, &host, "snapshot", &json!({"known":known})).unwrap();
+        assert_eq!(unchanged["workspace"]["files"], json!([]));
+        let edit = json!({"path":"index.html","content":"new text","expectedVersion":known["index.html"]});
+        dispatch(&state, &host, "save_document", &edit).unwrap();
+        known.insert("deleted.txt".into(), json!("old version"));
+        let delta = dispatch(&state, &host, "snapshot", &json!({"known":known})).unwrap();
+        let files = delta["workspace"]["files"].as_array().unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0]["content"], "new text");
+        assert_eq!(delta["workspace"]["removed"], json!(["deleted.txt"]));
     }
     #[test]
     fn nonblocking_listener_accepts_delayed_join_request() {

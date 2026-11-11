@@ -19,6 +19,9 @@ window.BlueGayAccount=(()=>{
       const result=await disk.call('chatgpt_status');
       if(!Array.isArray(result.accounts))throw Error('Could not read account status.');
       if(state.activeId!==result.activeId){modelRevision++;state.models=[];state.modelAccountId=null;state.modelError='';if(state.loaded)clearContext();}
+      else if (active()?.planEnabled && !result.accounts.some(a=>a.id===result.activeId&&a.signedIn&&a.planEnabled)) {
+        modelRevision++;state.models=[];state.modelAccountId=null;state.modelError='';chat.planLimitAccount=null;
+      }
       Object.assign(state,result,{loaded:true,error:''});render();return state;
     }catch(error){state.error=errorText(error);throw error;}
   }
@@ -38,6 +41,7 @@ window.BlueGayAccount=(()=>{
     if(!['api','chatgpt'].includes(mode))throw Error('Choose a connection method.');
     if(chat.request)throw Error('Stop the current response before changing accounts or billing.');
     if(mode==='chatgpt'&&!disk.available)throw Error('ChatGPT sign-in is available in the Windows desktop app.');
+    if (chatSettings.provider!==mode) {chat.apiLimits=null;chat.planLimitAccount=null;}
     chatSettings.provider=mode;chatSettings.connectionSelected=true;chat.status=null;
     localStorage.setItem('bluegay.agent.settings',JSON.stringify(chatSettings));await saveSettingsToComputer();
     if(mode==='chatgpt')await loadModels();
@@ -61,7 +65,7 @@ window.BlueGayAccount=(()=>{
   function show(){
     openModal(accountBody(),'account-modal');dialogOpen=true;modalCleanup=()=>{dialogOpen=false;};
     const bind=(id,action)=>{const el=$(id);if(el)el.onclick=()=>run(action);};
-    bind('#account-signin',()=>login(null));
+    bind('#account-signin',()=>login(state.accounts.find(a=>a.id===state.activeId&&!a.signedIn)?.id??null));
     bind('#account-enable',()=>login(state.activeId,true));
     bind('#account-cancel',()=>disk.call('chatgpt_cancel'));
     bind('#account-switch',()=>switchAccount($('#account-picker').value));
@@ -121,6 +125,13 @@ window.BlueGayAccount=(()=>{
     const footer=document.createElement('div');footer.className='account-strip';footer.innerHTML='<button id="account-button" class="account-button" aria-label="Sign in with ChatGPT"><span id="account-avatar" class="account-avatar">○</span><span class="account-label"><strong id="account-name">Sign in to ChatGPT</strong><small id="account-email">Account settings</small></span><span aria-hidden="true">⌃</span></button>';
     $('#sidebar').append(footer);$('#account-button').onclick=open;
     const compact=document.createElement('button');compact.id='account-compact';compact.setAttribute('aria-label','Account settings');compact.textContent='○';compact.onclick=open;$('.activity-bottom').append(compact);
+    if (disk.available) window.__TAURI__.event.listen('bluegay-chatgpt-session',async ()=>{
+      try {
+        if (chatSettings.provider==='chatgpt'&&!chat.request) await refreshChatStatus();
+        else await refresh();
+        if (dialogOpen && !state.busy && !state.pending) show();
+      } catch {}
+    }).catch(()=>{});
     try{await restoreConnection();}catch(error){state.error=errorText(error);render();}
   }
   window.addEventListener('bluegay-ready',init,{once:true});

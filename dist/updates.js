@@ -1,6 +1,6 @@
 /* Portable executable updates. Native code owns signatures and staged files. */
 window.BlueGayUpdates=(()=>{
-  const state={version:'1.0.5',endpoint:'',checking:false,installing:false,ready:false,release:null,message:'',error:''};
+  const state={version:'1.0.6',endpoint:'',checking:false,installing:false,ready:false,release:null,message:'',error:''};
   let dialog=false;
   const text=error=>error?.message||String(error);
   async function info(){const value=await disk.call('update_info');state.version=value.currentVersion;state.endpoint=value.endpoint;}

@@ -244,34 +244,199 @@ function showDiff(f){openModal(`<div class="modal-header"><h2>${escapeHtml(f.pat
 function renderOutline(){const f=currentFile();if(!f){$('#sidebar-content').innerHTML='<div class="empty-sidebar">Open a file to see its outline.</div>';return;}const items=[];f.content.split('\n').forEach((line,i)=>{const m=line.match(/^\s*(?:export\s+)?(?:default\s+)?(?:async\s+)?(?:function|class|interface|type|def|fn|struct|enum|const|let)\s+(\w+)/)||line.match(/^\s*(#{1,6}\s+.+)/);if(m)items.push({label:m[1],line:i+1});});$('#sidebar-content').innerHTML=`<div class="change-title">${escapeHtml(fileName(f.path))}</div>${items.map(x=>`<button class="search-result" data-search-file="${f.id}" data-line="${x.line}"><small>◇</small>${escapeHtml(x.label)}</button>`).join('')||'<div class="empty-sidebar">No symbols found. Use Ctrl Shift O for language-service symbols when available.</div>'}`;}
 async function downloadBlob(blob,name){if(disk.available){try{return await disk.call('export_bytes',{suggestedName:name,bytes:Array.from(new Uint8Array(await blob.arrayBuffer()))});}catch(error){toast(nativeError(error),'error');return false;}}const url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}
 async function downloadCurrent(){const f=currentFile();if(f&&window.BlueGayPreviews?.asset(f)){try{return await downloadBlob(new Blob([await window.BlueGayPreviews.readBytes(f)],{type:window.BlueGayPreviewCore.mime(f.path)}),fileName(f.path));}catch(error){return toast(nativeError(error),'error');}}if(f)downloadBlob(new Blob([f.content],{type:'text/plain;charset=utf-8'}),fileName(f.path));else toast('Select a file to download.','info');}
-async function exportZip(){if(files.some(f=>f.unsupported))return toast('This project contains non-text files. Use your disk folder to make a complete ZIP backup.','error');if(!files.length&&!explicitFolders.length)return toast('Add some files first.','info');const entries=Object.create(null);explicitFolders.forEach(p=>entries[p+'/']=new Uint8Array(0));files.forEach(f=>entries[f.path]=fflate.strToU8(f.content));try{const result=await downloadBlob(new Blob([fflate.zipSync(entries,{level:6})],{type:'application/zip'}),projectName+'.zip');if(result!==false)toast('Project exported. Your folder structure is preserved.');}catch{toast('Project could not be compressed. Try exporting individual files.','error');}}
+let exportingZip=false;
+async function addArchiveFile(zip, file) {
+  const binary = file.unsupported || file.previewOnly;
+  const entry = binary ? new fflate.ZipPassThrough(file.path) : new fflate.ZipDeflate(file.path,{level:6});
+  zip.add(entry);
+  if (!binary) {
+    entry.push(fflate.strToU8(file.content),true);
+  } else if (file.diskPath && !file.sourceId) {
+    let offset=0,version=null,size;
+    do {
+      const chunk=await disk.call('read_archive_chunk',{path:file.diskPath,offset,version});
+      const bytes=Uint8Array.from(atob(chunk.base64),c=>c.charCodeAt(0));
+      size=chunk.size;
+      version=chunk.version;
+      offset+=bytes.length;
+      if (offset>size || (!bytes.length && offset<size)) throw Error('Invalid file data.');
+      entry.push(bytes,offset===size);
+    } while (offset<size);
+  } else {
+    const bytes=await readBlockedFile(file.sourceId);
+    if (!bytes) throw Error('Reopen or drop the original file before exporting.');
+    entry.push(bytes,true);
+  }
+}
+async function exportZip(){
+  if (exportingZip) return;
+  if (!files.length&&!explicitFolders.length) return toast('Add some files first.','info');
+  const name=projectName+'.zip';
+  const exportFiles=files.map(({path,content,unsupported,previewOnly,sourceId,disk})=>({path,content,unsupported,previewOnly,sourceId,diskPath:disk?.path}));
+  const folders=[...explicitFolders];
+  exportingZip=true;
+  try {
+    const chunks=[];
+    let length=0;
+    const zip=new fflate.Zip((error,chunk)=>{
+      if (error) throw error;
+      length+=chunk.length;
+      if (length>=0xffffffff) throw Error('This project exceeds the ZIP export limit.');
+      chunks.push(chunk);
+    });
+    for (const path of folders) {
+      if (!validPath(path) || path.includes('\\')) throw Error('Invalid archive folder '+path);
+      const directory=new fflate.ZipPassThrough(path+'/');
+      zip.add(directory);
+      directory.push(new Uint8Array(0),true);
+    }
+    for (const file of exportFiles) {
+      if (!validPath(file.path) || file.path.includes('\\')) throw Error('Invalid archive path '+file.path);
+      try {await addArchiveFile(zip,file);}
+      catch (error) {throw Error(file.path+' · '+nativeError(error));}
+    }
+    zip.end();
+    const blob=new Blob(chunks,{type:'application/zip'});
+    const result=disk.available
+      ? await disk.call('export_archive',new Uint8Array(await new Blob([name+'\0',blob]).arrayBuffer()))
+      : await downloadBlob(blob,name);
+    if (result!==false) toast('Project exported. Your folder structure is preserved.');
+  } catch (error) {
+    toast('Could not export project. '+nativeError(error),'error');
+  } finally {exportingZip=false;}
+}
 function folderIcon(closed){return '<svg class="folder-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v10H3Z" fill="currentColor" opacity=".55"/><path d="'+(closed?'M3 10h18v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z':'M5 11h17l-3 9H2Z')+'" fill="currentColor"/><path d="M8 14v1m6-1v1m-5 2q2 2 4 0" stroke="var(--bg, #17191f)" stroke-width="1.2" stroke-linecap="round"/></svg>';}
 const blockedFileSources=new Map();
+function openImportedFileStore() {
+  return new Promise((resolve,reject)=>{
+    const request=window.indexedDB.open('bluegay-imported-files',1);
+    request.onupgradeneeded=()=>request.result.createObjectStore('files');
+    request.onsuccess=()=>resolve(request.result);
+    request.onerror=()=>reject(request.error);
+  });
+}
+async function storeBlockedFile(id, bytes) {
+  if (!window.indexedDB) return;
+  const db=await openImportedFileStore();
+  try {
+    await new Promise((resolve,reject)=>{
+      const tx=db.transaction('files','readwrite');
+      tx.objectStore('files').put(bytes,id);
+      tx.oncomplete=resolve;
+      tx.onabort=()=>reject(tx.error);
+    });
+  } finally {db.close();}
+}
+async function readBlockedFile(id) {
+  const source=blockedFileSources.get(id);
+  if (source) return source();
+  if (!id || !window.indexedDB) return null;
+  const [storageId,archiveEntry]=id.split('|',2);
+  const db=await openImportedFileStore();
+  try {
+    const stored=await new Promise((resolve,reject)=>{
+      const request=db.transaction('files').objectStore('files').get(storageId);
+      request.onsuccess=()=>resolve(request.result);
+      request.onerror=()=>reject(request.error);
+    });
+    if (archiveEntry && stored) return readZipEntry(stored,archiveEntry);
+    return stored instanceof Blob ? new Uint8Array(await stored.arrayBuffer()) : stored;
+  } finally {db.close();}
+}
+async function pruneImportedFiles() {
+  if (!window.indexedDB) return;
+  const db=await openImportedFileStore();
+  try {
+    const retained=new Set(files.filter(file=>file.sourceId).map(file=>file.sourceId.split('|',1)[0]));
+    for (const key of ['bluegay.workspace','bluegay.closedWorkspace','bluegay.togetherRecovery']) {
+      const saved=JSON.parse(localStorage.getItem(key)||'null');
+      for (const file of saved?.files||[]) if (file.sourceId) retained.add(file.sourceId.split('|',1)[0]);
+    }
+    await new Promise((resolve,reject)=>{
+      const tx=db.transaction('files','readwrite');
+      const cursor=tx.objectStore('files').openKeyCursor();
+      cursor.onsuccess=()=>{
+        const row=cursor.result;
+        if (!row) return;
+        if (!retained.has(row.key)) tx.objectStore('files').delete(row.key);
+        row.continue();
+      };
+      tx.oncomplete=resolve;
+      tx.onabort=()=>reject(tx.error);
+    });
+  } finally {db.close();}
+}
+window.addEventListener('bluegay-ready',()=>pruneImportedFiles().catch(()=>{}),{once:true});
 function warnUnsupported(file){openModal('<div class="modal-header"><h2>Open this file?</h2><button class="icon-button" data-action="closeModal">×</button></div><div class="modal-body"><p><strong>'+escapeHtml(file.path)+'</strong></p><p>'+escapeHtml(file.unsupported)+'</p><p>Open anyway bypasses the size and file-type limits. Large files may take longer to load. Binary files open as a read-only hex preview.</p><div class="modal-footer"><button class="secondary-button" data-action="closeModal">Cancel</button><button class="primary-button" id="open-anyway">Open anyway</button></div></div>');$('#open-anyway').onclick=async()=>{const button=$('#open-anyway');button.disabled=true;button.textContent='Opening…';try{await openUnsupportedAnyway(file);}finally{button.disabled=false;button.textContent='Open anyway';}};}
 function binaryPreview(bytes,total=bytes.length){let text='Read-only binary preview — showing '+Math.min(bytes.length,65536)+' of '+total+' bytes\n\n';bytes=bytes.subarray(0,65536);for(let i=0;i<bytes.length;i+=16){const row=Array.from(bytes.subarray(i,i+16));text+=i.toString(16).padStart(8,'0')+'  '+row.map(b=>b.toString(16).padStart(2,'0')).join(' ').padEnd(47)+'  '+row.map(b=>b>=32&&b<=126?String.fromCharCode(b):'.').join('')+'\n';}return text;}
 async function openUnsupportedAnyway(file){
   try {
-    if(file.disk){const document=await disk.call('read_document',{path:file.disk.path,forceOpen:true});if(!files.includes(file))return;adoptDiskDocument(file,document);file.baseline=document.content;}
+    if(file.disk&&!file.sourceId){const document=await disk.call('read_document',{path:file.disk.path,forceOpen:true});if(!files.includes(file))return;adoptDiskDocument(file,document);file.baseline=document.content;}
     else {
-      const source=blockedFileSources.get(file.sourceId);
-      if(!source)throw Error('Please reopen or drop the original file to use Open anyway.');
-      const bytes=await source();let content,previewOnly=false;
+      const bytes=await readBlockedFile(file.sourceId);
+      if(!bytes)throw Error('Please reopen or drop the original file to use Open anyway.');
+      let content,previewOnly=false;
       try{if(bytes.includes(0))throw Error();content=new TextDecoder('utf-8',{fatal:true}).decode(bytes);}catch{previewOnly=true;content=binaryPreview(bytes);}
       file.forceOpen=true;file.previewOnly=previewOnly;file.unsupported=previewOnly?'Read-only binary preview. The original bytes are unchanged.':null;
       setDocumentText(file,content);file.saved=content;file.baseline=content;
-      blockedFileSources.delete(file.sourceId);delete file.sourceId;
+      if(!previewOnly){blockedFileSources.delete(file.sourceId);delete file.sourceId;}
     }
     closeModal();switchTab(file.id);persist();
   }catch(error){toast('Could not open '+file.path+': '+nativeError(error),'error');}
 }
-function importedEntry(path,bytes,reason,source){let content='';let unsupported=reason||(/\.(png|gif|jpe?g|webp|ico|bmp|avif|pdf|zip|exe|dll|wasm|woff2?|ttf|mp[34]|wav|ogg)$/i.test(path)?'This file type cannot be opened in the text editor.':null);if(!unsupported){try{if(bytes.includes(0))throw Error();content=new TextDecoder('utf-8',{fatal:true}).decode(bytes);}catch{unsupported='Only UTF-8 text files can be edited.';}}const result={path,content,unsupported};if(unsupported&&(source||bytes)){result.sourceId=uid();blockedFileSources.set(result.sourceId,source||(()=>Promise.resolve(bytes)));}return result;}
-async function importBrowserFiles(list,folder=false){const imported=[];for(const item of list){const path=folder?item.webkitRelativePath.split('/').slice(1).join('/'):item.name;if(!validPath(path))continue;const source=async()=>new Uint8Array(await item.arrayBuffer());try{imported.push(importedEntry(path,item.size>MAX_FILE_BYTES?null:await source(),item.size>MAX_FILE_BYTES?'This file exceeds the default 50 MB limit.':null,source));}catch{imported.push(importedEntry(path,null,'This file could not be read.',source));}}if(folder){const name=list[0]?.webkitRelativePath.split('/')[0]||'workspace';await replaceWorkspace(imported,name);}else mergeFiles(imported);}
+function importedEntry(path,bytes,reason,source,stored=bytes,sourceId){
+  let content='';
+  let unsupported=reason||(/\.(png|gif|jpe?g|webp|ico|bmp|avif|pdf|zip|exe|dll|wasm|woff2?|ttf|mp[34]|wav|ogg)$/i.test(path)?'This file type cannot be opened in the text editor.':null);
+  if(!unsupported){try{if(bytes.includes(0))throw Error();content=new TextDecoder('utf-8',{fatal:true}).decode(bytes);}catch{unsupported='Only UTF-8 text files can be edited.';}}
+  const result={path,content,unsupported};
+  if(unsupported&&(source||bytes)){
+    sourceId??=uid();
+    result.sourceId=sourceId;
+    blockedFileSources.set(sourceId,bytes?()=>Promise.resolve(bytes):source);
+    if(stored)storeBlockedFile(sourceId,stored).catch(()=>{});
+  }
+  return result;
+}
+async function importBrowserFiles(list,folder=false){
+  const imported=[];
+  for(const item of list){
+    const path=folder?item.webkitRelativePath.split('/').slice(1).join('/'):item.name;
+    if(!validPath(path))continue;
+    const source=async()=>new Uint8Array(await item.arrayBuffer());
+    try {
+      if (item.size>MAX_FILE_BYTES) imported.push(importedEntry(path,null,'This file exceeds the default 50 MB limit.',source,item));
+      else imported.push(importedEntry(path,await source()));
+    } catch {imported.push(importedEntry(path,null,'This file could not be read.',source));}
+  }
+  if(folder){const name=list[0]?.webkitRelativePath.split('/')[0]||'workspace';await replaceWorkspace(imported,name);}else mergeFiles(imported);
+}
 async function replaceWorkspace(imported,name,folders=[]){if(window.BlueGayTogether?.mode)return toast('Leave Code Together before importing a workspace.','info');if(disk.available){if(!await guardUnsaved(files,'Save before importing another workspace.'))return;}if(!imported.length&&!folders.length)return toast('No files found in this folder.','error');const install=()=>{window.BlueGayPreviews?.reset();if(typeof resetChatLGBT==='function')resetChatLGBT();if(disk.available)nativeRoot=null;editor?.setModel(null);splitEditor?.setModel(null);models.forEach(m=>m.dispose());models.clear();viewStates.clear();files=imported.map(f=>({...f,id:uid(),saved:f.content,baseline:f.content,history:[],isDraft:disk.available}));projectName=name;tabs=[];explicitFolders=folders;collapsed.clear();switchTab(files.find(f=>!f.unsupported)?.id||null);persist();toast(`Opened ${files.length} files from ${name}.`);};confirmAction('Open folder',`Replace this workspace with ${name} (${imported.length} files)? Export your current workspace first if you want to keep it.`,install,'Open folder');}
 function mergeFiles(imported){if(window.BlueGayTogether?.mode)return toast('Leave Code Together before importing files.','info');const apply=()=>{let first;for(const item of imported){if(!validPath(item.path))continue;const existing=files.find(f=>f.path===item.path);if(existing){const m=models.get(existing.id);if(item.unsupported){closeTabNow(existing.id);m?.dispose();models.delete(existing.id);existing.content='';existing.saved='';existing.baseline='';}else if(m)m.pushEditOperations([],[{range:m.getFullModelRange(),text:item.content}],()=>null);else existing.content=item.content;existing.unsupported=item.unsupported||null;existing.sourceId=item.sourceId;existing.forceOpen=false;existing.previewOnly=false;first??=existing;}else{const f={...item,id:uid(),saved:item.content,baseline:item.content,history:[],isDraft:disk.available};files.push(f);first??=f;}}if(first)switchTab(first.id);persist();toast(`Opened ${imported.length} file${imported.length===1?'':'s'}.`);};if(imported.some(f=>files.some(o=>o.path===f.path)))confirmAction('Replace existing files?','Some imported filenames already exist. Replace their contents with the imported files?',apply,'Replace files');else apply();}
 function openFolder(){if(disk.available)return openNativeFolder();$('#folder-input').click();}
 async function writeBack(){if(disk.available)return saveAllFiles();if(!('showDirectoryPicker' in window))return toast('Writing to a folder is unavailable in this browser. Export a ZIP instead.','error');confirmAction('Write workspace to disk?',`Write ${files.filter(f=>!f.unsupported).length} text files to a folder you choose. Non-text files will be skipped. Files with matching names will be overwritten. Other disk files will be kept.`,async()=>{try{const dir=await window.showDirectoryPicker({mode:'readwrite'});let written=0;for(const f of files.filter(f=>!f.unsupported)){let current=dir;const parts=f.path.split('/');for(const part of parts.slice(0,-1))current=await current.getDirectoryHandle(part,{create:true});const handle=await current.getFileHandle(parts.at(-1),{create:true}),stream=await handle.createWritable();await stream.write(f.content);await stream.close();written++;}directoryHandle=dir;toast(`Wrote ${written} files to ${dir.name}.`);}catch(e){if(e.name!=='AbortError')toast('Writing did not finish. Check folder permissions and try again.','error');}},'Choose folder & write');}
-async function importZip(file){if(!file)return;try{const folders=[],imported=[];const entries=fflate.unzipSync(new Uint8Array(await file.arrayBuffer()),{filter:entry=>{if(entry.originalSize>MAX_FILE_BYTES){if(validPath(entry.name))imported.push(importedEntry(entry.name,null,'This file exceeds the default 50 MB limit.',async()=>fflate.unzipSync(new Uint8Array(await file.arrayBuffer()),{filter:item=>item.name===entry.name})[entry.name]));return false;}return true;}});for(const [path,bytes]of Object.entries(entries)){if(path.endsWith('/')&&validPath(path.slice(0,-1)))folders.push(path.slice(0,-1));if(path.endsWith('/')||!validPath(path))continue;imported.push(importedEntry(path,bytes));}await replaceWorkspace(imported,file.name.replace(/\.zip$/i,''),folders);}catch{toast('This ZIP could not be read. Please choose a valid ZIP archive.','error');}}
-function showAbout(){openModal('<div class="modal-header"><h2>BlueGay</h2><button class="icon-button" data-action="closeModal">×</button></div><div class="modal-body"><p>Version 1.0.5</p><p><strong>An unofficial parody of BlueJ IDE.</strong></p><p>BlueGay is an independent project and is not affiliated with or endorsed by the BlueJ project or its developers.</p><p>Open source under the MIT license. Third-party components retain their own licenses.</p><p>Source: <code>github.com/ReviveRC/BlueGay</code></p><button class="secondary-button" data-action="updates">Check for updates</button><p>Your space to code. Built with Monaco Editor.</p><p>The desktop app opens project files directly and saves to disk with Ctrl+S. It keeps recovery copies locally and checks for external changes. The browser preview uses browser storage instead. Export a ZIP for a portable backup.</p><p>JavaScript, TypeScript, HTML, CSS, and JSON support language services including completion and diagnostics. Python has offline Ruff syntax and lint diagnostics (including undefined names and unused imports); YAML, TOML, and XML have syntax validation. C#, C++, and Java have offline syntax checks for malformed statements and missing punctuation using Tree-sitter. These checks do not resolve types, dependencies, or compiler/project settings. Python checks are per file, without type checking, project import resolution, or pyproject.toml configuration. Other languages offer syntax highlighting, word completion, and common snippets. Features that require language servers, Git remotes, or installed packages are not connected.</p><p>Run and debug Python scripts and Java projects using Run → Debugger settings to select runtimes and set up debug adapters.</p><div class="modal-footer"><button class="primary-button" data-action="closeModal">Back to my code</button></div></div>');}
+async function readZipEntry(archive,path) {
+  return fflate.unzipSync(new Uint8Array(await archive.arrayBuffer()),{filter:entry=>entry.name===path})[path];
+}
+async function importZip(file){
+  if(!file)return;
+  try {
+    const folders=[],imported=[],archiveId=uid();
+    const entries=fflate.unzipSync(new Uint8Array(await file.arrayBuffer()),{filter:entry=>{
+      if(entry.originalSize<=MAX_FILE_BYTES)return true;
+      const path=entry.name;
+      if(validPath(path))imported.push(importedEntry(path,null,'This file exceeds the default 50 MB limit.',
+        ()=>readZipEntry(file,path),null,archiveId+'|'+path));
+      return false;
+    }});
+    if(imported.length)storeBlockedFile(archiveId,file).catch(()=>{});
+    for(const [path,bytes]of Object.entries(entries)){
+      if(path.endsWith('/')&&validPath(path.slice(0,-1)))folders.push(path.slice(0,-1));
+      else if(validPath(path))imported.push(importedEntry(path,bytes));
+    }
+    await replaceWorkspace(imported,file.name.replace(/\.zip$/i,''),folders);
+  }catch{toast('This ZIP could not be read. Please choose a valid ZIP archive.','error');}
+}
+function showAbout(){openModal('<div class="modal-header"><h2>BlueGay</h2><button class="icon-button" data-action="closeModal">×</button></div><div class="modal-body"><p>Version 1.0.6</p><p><strong>An unofficial parody of BlueJ IDE.</strong></p><p>BlueGay is an independent project and is not affiliated with or endorsed by the BlueJ project or its developers.</p><p>Open source under the MIT license. Third-party components retain their own licenses.</p><p>Source: <code>github.com/ReviveRC/BlueGay</code></p><button class="secondary-button" data-action="updates">Check for updates</button><p>Your space to code. Built with Monaco Editor.</p><p>The desktop app opens project files directly and saves to disk with Ctrl+S. It keeps recovery copies locally and checks for external changes. The browser preview uses browser storage instead. Export a ZIP for a portable backup.</p><p>JavaScript, TypeScript, HTML, CSS, and JSON support language services including completion and diagnostics. Python has offline Ruff syntax and lint diagnostics (including undefined names and unused imports); YAML, TOML, and XML have syntax validation. C#, C++, and Java have offline syntax checks for malformed statements and missing punctuation using Tree-sitter. These checks do not resolve types, dependencies, or compiler/project settings. Python checks are per file, without type checking, project import resolution, or pyproject.toml configuration. Other languages offer syntax highlighting, word completion, and common snippets. Features that require language servers, Git remotes, or installed packages are not connected.</p><p>Run and debug Python scripts and Java projects using Run → Debugger settings to select runtimes and set up debug adapters.</p><div class="modal-footer"><button class="primary-button" data-action="closeModal">Back to my code</button></div></div>');}
 
 function renderThemePreferences(query){
   const catalog=window.BlueGayThemes;
@@ -289,14 +454,115 @@ const settingGroups={
  ['Editor appearance','The little details make a big difference.',[
  ['fontFamily','Font family','Choose the typeface you feel at home in.',['JetBrains Mono','Consolas','Cascadia Code','Courier New']],['fontSize','Font size','Editor text size in pixels.','number',10,30],['lineHeight','Line height','Give your code a little room to breathe.','number',16,44],['cursorStyle','Cursor style','Make your place in the code unmistakable.',['line','block','underline','line-thin','block-outline']],['cursorBlinking','Cursor animation','A subtle blink, or perfectly still.',['smooth','blink','phase','expand','solid']],['lineNumbers','Line numbers','Show a reference number beside every line.','toggle'],['minimap','Minimap','A birds-eye view of your current file.','toggle'],['bracketColors','Color bracket pairs','Follow nested brackets with matching colors.','toggle']]]],
  editor:[['Editing','Less friction. More flow.',[
- ['tabSize','Tab size','Choose the width of each indentation level.',['2','4','8']],['insertSpaces','Insert spaces','Use spaces when you press Tab.','toggle'],['wordWrap','Word wrap','Keep long lines within the editor width.','toggle'],['autoClosingBrackets','Auto-close brackets and quotes','Finish pairs as you type.','toggle'],['indentGuides','Indentation guides','Subtle guides that make structure easier to follow.','toggle'],['stickyScroll','Sticky scope headers','Keep the current function or class in view.','toggle'],['renderWhitespace','Show whitespace','Make spaces and tabs visible when you need them.',['none','selection','boundary','all']],['smoothScrolling','Smooth scrolling','Move through your code with a smooth scroll.','toggle']]],
+ ['tabSize','Tab size','Choose the width of each indentation level.','number',1,32],['insertSpaces','Insert spaces','Use spaces when you press Tab.','toggle'],['wordWrap','Word wrap','Keep long lines within the editor width.','toggle'],['autoClosingBrackets','Auto-close brackets and quotes','Finish pairs as you type.','toggle'],['indentGuides','Indentation guides','Subtle guides that make structure easier to follow.','toggle'],['stickyScroll','Sticky scope headers','Keep the current function or class in view.','toggle'],['renderWhitespace','Show whitespace','Make spaces and tabs visible when you need them.',['none','selection','boundary','all']],['smoothScrolling','Smooth scrolling','Move through your code with a smooth scroll.','toggle']]],
  ['Code intelligence','Helpful suggestions, right when you need them.',[
  ['autoComplete','Automatic suggestions','Suggest symbols, words, and snippets while typing.','toggle'],['codePrediction','Code prediction','Show AI code predictions after a short pause. Tab accepts; Escape dismisses. Sends nearby code and referenced files using your ChatLGBT connection and consumes model usage.','toggle'],['predictionModel','Prediction model','Choose a model for code prediction, or follow your ChatLGBT model.','predictionModel'],['parameterHints','Parameter hints','Show signature help as you call functions.','toggle'],['formatOnPaste','Format on paste','Format pasted code where the language supports it.','toggle'],['formatOnSave','Format on save','Format the active document before saving, when supported.','toggle']]]],
  workspace:[['Files & saving','Your workspace, ready when you are.',[
  ['autoSave','Auto save',disk.available?'Save edits to disk after one second of inactivity. Choose a location for new drafts first.':'Save edits in this browser after one second of inactivity.','toggle'],['fixIndentationOnSave','Fix indentation on save','Reindent on Ctrl+S, Save As, and Save All using your tab size and spaces/tabs setting, where supported. Autosave leaves typing uninterrupted.','toggle'],['restoreSession','Restore last session','Reopen your project and tabs on your next visit.','toggle'],['trimWhitespace','Trim trailing whitespace','Remove extra spaces at line endings when saving.','toggle'],['finalNewline','Insert final newline','Keep a newline at the end of saved files.','toggle'],['confirmDelete','Confirm file deletion',disk.available?'Disk files always require confirmation before moving to Recycle Bin.':'Ask before removing a file from this workspace.','toggle']]]]
 };
+
+function parseVSCodeSettings(text) {
+  const withoutComments=text.replace(/^\uFEFF/,'').replace(/"(?:\\.|[^"\\])*"|\/\/[^\r\n]*|\/\*[\s\S]*?\*\//g,
+    token=>token.startsWith('"')?token:' ');
+  const json=withoutComments.replace(/"(?:\\.|[^"\\])*"|,(?=\s*[}\]])/g,(token,offset)=>{
+    if (token!==',') return token;
+    let previous=offset-1;
+    while (previous>=0 && /\s/.test(withoutComments[previous])) previous--;
+    return previous>=0 && !'{[,'.includes(withoutComments[previous]) ? '' : token;
+  });
+  const settings=JSON.parse(json);
+  if (!settings || typeof settings!=='object' || Array.isArray(settings)) throw Error('Choose a VS Code settings.json file.');
+  return settings;
+}
+
+function vsCodePreferences(settings) {
+  const supported={
+    'editor.fontSize':'fontSize','editor.fontFamily':'fontFamily','editor.lineHeight':'lineHeight',
+    'editor.tabSize':'tabSize','editor.insertSpaces':'insertSpaces','editor.wordWrap':'wordWrap',
+    'editor.minimap.enabled':'minimap','editor.lineNumbers':'lineNumbers',
+    'editor.bracketPairColorization.enabled':'bracketColors','editor.guides.indentation':'indentGuides',
+    'editor.stickyScroll.enabled':'stickyScroll','editor.renderWhitespace':'renderWhitespace',
+    'editor.cursorStyle':'cursorStyle','editor.cursorBlinking':'cursorBlinking','editor.smoothScrolling':'smoothScrolling',
+    'editor.parameterHints.enabled':'parameterHints','editor.formatOnPaste':'formatOnPaste','editor.formatOnSave':'formatOnSave',
+    'files.autoSave':'autoSave','files.trimTrailingWhitespace':'trimWhitespace','files.insertFinalNewline':'finalNewline',
+    'explorer.confirmDelete':'confirmDelete'
+  };
+  const controls=new Map(Object.values(settingGroups).flatMap(groups=>groups.flatMap(([, , settings])=>settings.map(row=>[row[0],row]))));
+  const preferences={};
+  for (const [source,id] of Object.entries(supported)) {
+    let value=settings[source];
+    const [, , , type, min, max]=controls.get(id);
+    if (id==='autoSave') {
+      if (value==='off' || value==='afterDelay') preferences[id]=value==='afterDelay';
+      continue;
+    }
+    if (id==='wordWrap' || id==='lineNumbers') {
+      if (value==='off' || value==='on') preferences[id]=value==='on';
+      continue;
+    }
+    if (id==='fontFamily' && typeof value==='string') value=value.split(',')[0].trim().replace(/^['"]|['"]$/g,'');
+    if ((type==='toggle' && typeof value==='boolean') ||
+        (type==='number' && Number.isInteger(value) && value>=min && value<=max) ||
+        (Array.isArray(type) && type.includes(value))) preferences[id]=value;
+  }
+  return preferences;
+}
+
+function showVSCodeImport() {
+  openModal(`<div class="modal-header"><h2>Import VS Code settings</h2><button class="icon-button" data-action="closeModal" aria-label="Close">×</button></div>
+    <div class="modal-body">
+      <p>In VS Code, run <strong>Preferences: Open User Settings (JSON)</strong> and select that file here. BlueGay imports supported editor and file preferences.</p>
+      <label>VS Code settings file <input type="file" id="vscode-settings-file" accept=".json,.jsonc"></label>
+      <p id="vscode-import-status" role="status"></p>
+      <ul id="vscode-import-preview" hidden></ul>
+      <div class="modal-footer"><button class="secondary-button" data-action="closeModal">Cancel</button>
+      <button class="primary-button" id="vscode-import-apply" disabled>Import settings</button></div>
+    </div>`);
+  const input=$('#vscode-settings-file'),status=$('#vscode-import-status'),preview=$('#vscode-import-preview'),apply=$('#vscode-import-apply');
+  let pending,revision=0;
+  input.onchange=async ()=>{
+    const current=++revision,file=input.files[0];
+    pending=null;apply.disabled=true;preview.hidden=true;status.textContent='';
+    if (!file) return;
+    try {
+      if (file.size>1024*1024) throw Error('Choose a settings file smaller than 1 MB.');
+      const imported=vsCodePreferences(parseVSCodeSettings(await file.text()));
+      if (current!==revision) return;
+      if (!Object.keys(imported).length) throw Error('No supported VS Code preferences were found.');
+      pending=imported;
+      preview.innerHTML=Object.values(settingGroups).flatMap(groups=>groups.flatMap(([, , settings])=>settings
+        .filter(([id])=>Object.hasOwn(imported,id)).map(([id,label])=>`<li>${escapeHtml(label)} · ${escapeHtml(typeof imported[id]==='boolean'?(imported[id]?'On':'Off'):String(imported[id]))}</li>`))).join('');
+      preview.hidden=false;
+      apply.disabled=false;
+    } catch (error) {
+      if (current===revision) status.textContent=error instanceof SyntaxError?'Could not read the VS Code settings file.':nativeError(error);
+    }
+  };
+  apply.onclick=()=>{
+    if (!pending) return;
+    prefs={...prefs,...pending};
+    savePreferences();
+    closeModal();
+    if (activeId==='preferences') renderPreferences();
+    toast('VS Code settings imported.');
+  };
+}
+
+window.addEventListener('bluegay-ready',()=>{
+  try {
+    const key='bluegay.vscodeImportOffered';
+    if (localStorage.getItem(key)) return;
+    localStorage.setItem(key,'1');
+    const offer=document.createElement('div');
+    offer.className='toast toast-info vscode-import-offer';
+    offer.innerHTML='<span>Bring your editor preferences from VS Code.</span><div><button class="secondary-button" id="vscode-import-skip">Dismiss</button><button class="primary-button" id="vscode-import-start">Import VS Code settings</button></div>';
+    $('#toasts').append(offer);
+    $('#vscode-import-skip').onclick=()=>offer.remove();
+    $('#vscode-import-start').onclick=()=>{offer.remove();showVSCodeImport();};
+  } catch {}
+},{once:true});
 const shortcutRows=[['Compile Java project','Ctrl Shift B'],['Run Java tests','Ctrl Alt T'],['Run without debugging','Ctrl F5'],['Start / continue debugging','F5'],['Stop debugging','Shift F5'],['Restart debugging','Ctrl Shift F5'],['Step over','F10'],['Step into','F11'],['Step out','Shift F11'],['Toggle breakpoint','F9'],['Debug console','Ctrl Shift D'],['Open HTML in browser','Ctrl Alt B'],['Command palette','Ctrl K'],['Quick open file','Ctrl P'],['Open folder','Ctrl O'],['New file','Ctrl N'],[disk.available?'Save file to disk':'Save file in browser','Ctrl S'],['Save As','Ctrl Shift S'],['Save all files','Ctrl Alt S'],['Preferences','Ctrl ,'],['Find in file','Ctrl F'],['Replace in file','Ctrl H'],['Search workspace','Ctrl Shift F'],['Toggle line comment','Ctrl /'],['Toggle block comment','Shift Alt A'],['Trigger completion','Ctrl Space'],['Format document','Shift Alt F'],['Go to line','Ctrl G'],['Go to symbol','Ctrl Shift O'],['Go to definition','F12'],['Peek definition','Alt F12'],['Rename selected file (Explorer)','F2'],['Delete selected file or folder (Explorer)','Del'],['Rename symbol (editor)','F2'],['Add next match to selection','Ctrl D'],['Select all matching occurrences','Ctrl Shift L'],['Add cursor','Alt Click'],['Duplicate line','Shift Alt ↓ / ↑'],['Move line','Alt ↓ / ↑'],['Toggle word wrap','Alt Z'],['Split editor','Ctrl \\'],['Toggle sidebar','Ctrl B'],['Toggle bottom panel','Ctrl J'],['Close active tab','Ctrl W'],['Next tab','Ctrl Alt →'],['Previous tab','Ctrl Alt ←'],['Undo','Ctrl Z'],['Redo','Ctrl Shift Z'],['Fold code','Ctrl Shift ['],['Unfold code','Ctrl Shift ]'],['Exit zen mode','Esc']];
-function renderPreferences(){const root=$('#preferences');root.innerHTML=`<div class="preferences-layout"><div class="preferences-title"><div><div class="eyebrow">MAKE YOURSELF AT HOME</div><h1>Preferences</h1><p>Your editor. Your rhythm. Your rules.</p></div><button class="secondary-button" id="reset-preferences">Reset to defaults</button></div><input class="preferences-search" id="preferences-search" placeholder="Search settings…" aria-label="Search settings" value="${escapeHtml(prefFilter)}"><div class="preferences-nav">${['appearance','editor','workspace','shortcuts'].map(t=>`<button class="${prefTab===t?'active':''}" data-pref-tab="${t}">${({appearance:'Appearance',editor:'Editor',workspace:'Workspace',shortcuts:'Keyboard shortcuts'})[t]}</button>`).join('')}</div><div id="settings-content"></div><div class="preferences-bottom"><button class="secondary-button" data-action="updates">Updates</button> <span>BlueGay 1.0.5</span></div><div class="preferences-bottom" id="settings-storage-status">${escapeHtml(settingsStorageMessage())}</div></div>`;$('#preferences-search').oninput=e=>{prefFilter=e.target.value;renderSettingsContent();};$('#reset-preferences').onclick=()=>confirmAction('Reset preferences?','Restore all appearance, editor, and workspace preferences to their defaults. Your files will be kept.',()=>{prefs={...defaults};savePreferences();renderPreferences();toast('Preferences reset.');},'Reset preferences');renderSettingsContent();}
+function renderPreferences(){const root=$('#preferences');root.innerHTML=`<div class="preferences-layout"><div class="preferences-title"><div><div class="eyebrow">MAKE YOURSELF AT HOME</div><h1>Preferences</h1><p>Your editor. Your rhythm. Your rules.</p></div><button class="secondary-button" id="reset-preferences">Reset to defaults</button></div><input class="preferences-search" id="preferences-search" placeholder="Search settings…" aria-label="Search settings" value="${escapeHtml(prefFilter)}"><div class="preferences-nav">${['appearance','editor','workspace','shortcuts'].map(t=>`<button class="${prefTab===t?'active':''}" data-pref-tab="${t}">${({appearance:'Appearance',editor:'Editor',workspace:'Workspace',shortcuts:'Keyboard shortcuts'})[t]}</button>`).join('')}</div><div id="settings-content"></div><div class="preferences-bottom"><button class="secondary-button" id="vscode-import-open">Import VS Code settings</button> <button class="secondary-button" data-action="updates">Updates</button> <span>BlueGay 1.0.6</span></div><div class="preferences-bottom" id="settings-storage-status">${escapeHtml(settingsStorageMessage())}</div></div>`;$('#vscode-import-open').onclick=()=>showVSCodeImport();$('#preferences-search').oninput=e=>{prefFilter=e.target.value;renderSettingsContent();};$('#reset-preferences').onclick=()=>confirmAction('Reset preferences?','Restore all appearance, editor, and workspace preferences to their defaults. Your files will be kept.',()=>{prefs={...defaults};savePreferences();renderPreferences();toast('Preferences reset.');},'Reset preferences');renderSettingsContent();}
 function renderSettingsContent(){const q=prefFilter.toLowerCase();const root=$('#settings-content');if(prefTab==='shortcuts'){const rows=shortcutRows.filter(r=>r.join(' ').toLowerCase().includes(q));root.innerHTML=`<section class="settings-section"><h2>A shortcut to your flow</h2><p>On macOS, use ⌘ in place of Ctrl for editor shortcuts. Language services vary by language.</p><table class="shortcut-table"><tbody>${rows.map(([label,key])=>`<tr><td>${label}</td><td><kbd>${key}</kbd></td></tr>`).join('')}</tbody></table></section>`;return;}let html='';if(prefTab==='appearance')html=renderThemePreferences(q);
 const groups=q?Object.values(settingGroups).flat():settingGroups[prefTab];for(const [title,description,settings]of groups){const filtered=settings.filter(([id,label,desc])=>(label+' '+desc+' '+(window.BlueGayI18n?.translate(label)||'')+' '+(window.BlueGayI18n?.translate(desc)||'')).toLowerCase().includes(q));if(!filtered.length)continue;html+=`<section class="settings-section"><h2>${title}</h2><p>${description}</p>${filtered.map(([id,label,desc,type,min,max])=>{let control;if(type==='toggle')control=`<button class="toggle ${prefs[id]?'on':''}" role="switch" aria-checked="${prefs[id]}" aria-label="${label}" data-toggle="${id}"></button>`;else if(type==='predictionModel')control=`<select data-setting="${id}" aria-label="${label}">${predictionModelOptions()}</select>`;else if(type==='number')control=`<input type="number" min="${min}" max="${max}" value="${prefs[id]}" data-setting="${id}" aria-label="${label}">`;else control=`<select data-setting="${id}" aria-label="${label}">${type.map(v=>`<option ${String(prefs[id])===v?'selected':''} value="${v}">${id==='locale'?({en:'English','fr-CA':'Français (Canada)'})[v]:v}</option>`).join('')}</select>`;return `<div class="setting-row"><div><h3>${label}</h3><p>${desc}</p></div>${control}</div>`;}).join('')}</section>`;}
 if((prefTab==='editor'||q)&&prefs.codePrediction)html+=`<p class="info-note" id="prediction-status" role="status">${escapeHtml(codePredictions?.status()||'Code prediction uses the connection selected in ChatLGBT. Connect an account to start. Suggestions use model allowance even when dismissed.')}</p>`;if(prefTab==='workspace'&&!q)html+=disk.available?'<div class="info-note">Ctrl+S saves directly to the opened disk file. Autosave applies to files with a disk location. Unsaved text and recent file history are also kept in local recovery storage. External changes are checked every four seconds and when the window regains focus.</div>':'<div class="info-note">Browser preview: files stay in browser storage. The desktop app saves directly to disk.</div>';root.innerHTML=html||'<div class="setting-empty">No settings found. Try a different search.</div>';$('#custom-accent')?.addEventListener('input',e=>{prefs.accent=e.target.value;savePreferences();$('#settings-content').querySelectorAll('[data-accent]').forEach(button=>{const selected=button.dataset.accent===prefs.accent;button.classList.toggle('selected',selected);button.setAttribute('aria-pressed',String(selected));});});}

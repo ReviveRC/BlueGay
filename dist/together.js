@@ -50,71 +50,130 @@ function renderTogetherPresence() {
   }
   for (const id of together.decorations.keys()) if(!models.has(id))together.decorations.delete(id);
 }
+const togetherSaveTimers = new WeakMap();
 function togetherEdited(file) {
-  if (!together.mode || together.leaving || nativePaused || togetherReadOnly() || file.aiPendingSave) return;
-  clearTimeout(file.togetherTimer);
-  file.togetherTimer=setTimeout(()=>{if(together.mode&&!together.leaving&&!nativePaused&&!togetherReadOnly()&&!file.diskConflict&&!file.saveError)saveFile(file,false,{automatic:true});},300);
+  if (!together.mode || together.leaving || nativePaused || togetherReadOnly() || file.aiPendingSave ||
+      !file.disk || togetherSaveTimers.has(file) || file.diskConflict || file.saveError) return;
+  const epoch = together.epoch;
+  const timer = setTimeout(async () => {
+    try {
+      if (epoch === together.epoch && !together.leaving && !nativePaused && !togetherReadOnly() &&
+          !file.diskConflict && !file.saveError && !file.aiPendingSave) {
+        await saveFile(file, false, {automatic:true});
+      }
+    } finally {
+      if (togetherSaveTimers.get(file) === timer) togetherSaveTimers.delete(file);
+      if (epoch === together.epoch && !file.deleted && fileDirty(file)) togetherEdited(file);
+    }
+  }, 120);
+  togetherSaveTimers.set(file,timer);
 }
-function mergeTogetherSnapshot(snapshot) {
+function mergeTogetherSnapshot(snapshot, baseline, foldersBefore) {
   const regainedWrite=together.mode==='guest'&&!together.permissions.write&&snapshot.permissions.write;
-  together.permissions=snapshot.permissions;
-  together.members=snapshot.presence||[];
+  const permissionsChanged = ['write','createDelete','console'].some(key=>together.permissions[key]!==snapshot.permissions[key]);
+  const presence = snapshot.presence || [];
+  const presenceChanged = JSON.stringify(together.members) !== JSON.stringify(presence);
+  together.permissions = snapshot.permissions;
+  together.members = presence;
+  let changed = false;
+  const current = new Map(files.map(file=>[file.path,file]));
+  const canMerge = (path, file) => {
+    if (file?.saving) return false;
+    if (!baseline) return true;
+    const previous = baseline.get(path);
+    return previous ? previous.file === file && previous.version === file.disk?.version : !file;
+  };
   const incoming = new Map(snapshot.workspace.files.map(d=>[d.path,d]));
   for (const document of incoming.values()) {
+    const file = current.get(document.path);
+    if (!canMerge(document.path,file)) continue;
     if (together.mode==='host') document.absolutePath=nativePath(document.path);
-    const file=files.find(f=>f.path===document.path);
-    if (!file) {files.push(nativeFile(document));continue;}
-    if (file.saving || file.disk?.version===document.version) continue;
+    if (!file) {files.push(nativeFile(document));changed=true;continue;}
+    if (file.disk?.version===document.version) {
+      if (file.forceOpen) file.togetherScanVersion=document.scanVersion;
+      continue;
+    }
     if (fileDirty(file)) {
-      if(!file.diskConflict)toast(file.path+' has overlapping edits. Click its disk status to review.','error');
-      file.diskConflict={code:'conflict',message:'Another collaborator changed this file.'};
+      if (!file.diskConflict) {
+        toast(file.path+' has overlapping edits. Click its disk status to review.','error');
+        file.diskConflict={code:'conflict',message:'Another collaborator changed this file.'};
+        changed=true;
+      }
     } else {
-      // Avoid resetting models/cursors for identical content on each heartbeat.
-      const view=editor&&editor.getModel()===models.get(file.id)?editor.saveViewState():null;
+      const views=[editor,splitEditor].filter(ed=>ed&&ed.getModel()===models.get(file.id)).map(ed=>[ed,ed.saveViewState()]);
       adoptDiskDocument(file,document);
-      if(view)editor.restoreViewState(view);
+      file.togetherScanVersion=document.scanVersion;
+      for (const [ed,view] of views) if (view) ed.restoreViewState(view);
+      changed=true;
     }
   }
   if(!snapshot.workspace.skipped) {
-    for(const file of [...files]) if(!incoming.has(file.path)&&!file.saving&&!file.isDraft) {
-      if(fileDirty(file))file.diskConflict={code:'missing',message:'A collaborator deleted this file. Export your changes to keep a copy.'};
-      else removeWorkspaceFile(file);
+    const removed = snapshot.workspace.removed ?? [...current.keys()].filter(path=>!incoming.has(path));
+    for (const path of removed) {
+      const file = current.get(path);
+      if (!file || file.isDraft || !canMerge(path,file)) continue;
+      if (fileDirty(file)) {
+        if (file.diskConflict?.code==='missing') continue;
+        file.diskConflict={code:'missing',message:'A collaborator deleted this file. Export your changes to keep a copy.'};
+      } else removeWorkspaceFile(file);
+      changed=true;
     }
-    explicitFolders=snapshot.workspace.folders;
+    const currentFolders = JSON.stringify(explicitFolders);
+    if ((!baseline || currentFolders===foldersBefore) && currentFolders!==JSON.stringify(snapshot.workspace.folders)) {
+      explicitFolders=snapshot.workspace.folders;
+      changed=true;
+    }
   }
-  togetherOptions();renderTogetherPresence();refreshFileUI();persist();
+  if (permissionsChanged) togetherOptions();
+  if (changed || presenceChanged || permissionsChanged) renderTogetherPresence();
+  if (changed) {refreshFileUI();persist();}
   if(regainedWrite)for(const file of files){if(file.saveError?.code==='permission')file.saveError=null;if(fileDirty(file))togetherEdited(file);}
 }
 async function pollTogether() {
   if (!together.mode || together.busy || together.leaving || nativePaused || nativeClosing) return;
   together.busy=true;
   const epoch=together.epoch;
-  const signature=()=>JSON.stringify([files.map(f=>[f.id,f.path,f.disk?.version]),explicitFolders]);
-  const before=signature();
+  const baseline=new Map(files.map(file=>[file.path,{file,version:file.disk?.version}]));
+  const foldersBefore=JSON.stringify(explicitFolders);
+  const known=Object.fromEntries([...baseline].map(([path,{file,version}])=>[path,file.forceOpen?(file.togetherScanVersion??null):(version??null)]));
   try {
+    const args={presence:togetherPresence(),known};
     const snapshot=together.mode==='host'
-      ? await togetherNative('together_host_poll',{presence:togetherPresence()})
-      : await togetherRemote('snapshot',{presence:togetherPresence()});
-    for(const file of files.filter(f=>f.forceOpen&&f.disk)) {
-      const index=snapshot.workspace.files.findIndex(d=>d.path===file.path);
-      if(index>=0) snapshot.workspace.files[index]={...await disk.call('read_document',{path:file.disk.path,forceOpen:true}),path:file.path};
+      ? await togetherNative('together_host_poll',args)
+      : await togetherRemote('snapshot',args);
+    for (const [index,document] of snapshot.workspace.files.entries()) {
+      if(epoch!==together.epoch)return;
+      const file=baseline.get(document.path)?.file;
+      if (file?.forceOpen&&file.disk) {
+        try {
+          const opened=await disk.call('read_document',{path:file.disk.path,forceOpen:true});
+          snapshot.workspace.files[index]={...opened,path:document.path,scanVersion:document.version};
+        } catch {
+          // A file may have moved between the scan and this read. Retry it on the next scan.
+          snapshot.workspace.files[index]=null;
+        }
+      }
     }
     if(epoch!==together.epoch)return;
     const reconnect=!together.connected;together.connected=true;
     if(reconnect) {for(const file of files)if(!file.diskConflict)file.saveError=null;toast('Code Together reconnected.');}
-    if(before===signature())mergeTogetherSnapshot(snapshot);
-    else {together.permissions=snapshot.permissions;together.members=snapshot.presence||[];togetherOptions();renderTogetherPresence();}
-    if(reconnect)files.filter(fileDirty).forEach(togetherEdited);
+    if (snapshot.workspace.files.includes(null)) {
+      snapshot.workspace.files=snapshot.workspace.files.filter(Boolean);
+      if (!snapshot.workspace.removed) snapshot.workspace.skipped++;
+    }
+    mergeTogetherSnapshot(snapshot,baseline,foldersBefore);
+    if(reconnect){togetherOptions();renderTogetherPresence();files.filter(fileDirty).forEach(togetherEdited);}
   } catch(error) {
     if(epoch!==together.epoch)return;
     if(together.connected)toast('Code Together disconnected. Your unsaved edits are kept. '+nativeError(error),'error');
     together.connected=false;together.members=[];togetherOptions();renderTogetherPresence();
-  } finally {together.busy=false;}
+  } finally {if (epoch===together.epoch) together.busy=false;}
 }
 function togetherTransport(command,args,invoke) {
-  const operations=['read_document','save_document','rename_document','trash_document','trash_folder','create_folder'];
+  const reads=['read_document','read_archive_chunk'];
+  const operations=[...reads,'save_document','rename_document','trash_document','trash_folder','create_folder'];
   if(operations.includes(command)) {
-    if(command!=='read_document'&&!togetherAllowed(command!=='save_document'||args.expectedVersion===null))return Promise.reject({code:'permission',message:'This operation is not permitted by the host.'});
+    if(!reads.includes(command)&&!togetherAllowed(command!=='save_document'||args.expectedVersion===null))return Promise.reject({code:'permission',message:'This operation is not permitted by the host.'});
     const wire={...args};
     for(const key of ['path','destination'])if(wire[key]) {
       if(!wire[key].startsWith('together/'))return Promise.reject({code:'path',message:'Choose a file in the shared project.'});
@@ -129,11 +188,18 @@ function togetherTransport(command,args,invoke) {
 function installTogetherWorkspace(workspace) {
   window.BlueGayDebugger?.reset();if(typeof resetChatLGBT==='function')resetChatLGBT();
   clearTimeout(saveTimer);clearTimeout(persistenceTimer);
-  files.forEach(f=>clearTimeout(f.togetherTimer));
+  clearTogetherFileTimers();
   editor?.setModel(null);splitEditor?.setModel(null);models.forEach(m=>m.dispose());models.clear();viewStates.clear();together.decorations.clear();
   files=workspace.files.map(d=>nativeFile(d));explicitFolders=workspace.folders;nativeRoot=workspace.root;
   projectName=workspace.name;tabs=[];collapsed.clear();scratchpad='';
   switchTab(files.find(f=>!f.unsupported)?.id||null);setSidebar('explorer');
+}
+function clearTogetherFileTimers() {
+  for (const file of files) {
+    clearTimeout(togetherSaveTimers.get(file));
+    togetherSaveTimers.delete(file);
+    delete file.togetherScanVersion;
+  }
 }
 async function startTogether() {
   if(!nativeReady||!nativeRoot)return toast('Open a project folder before hosting Code Together.','info');
@@ -164,10 +230,11 @@ async function leaveTogether() {
   const mode=together.mode,previous=together.previous;
   together.leaving=true;
   together.epoch++;
+  together.busy=false;
   if(mode==='host')try{await togetherNative('together_stop');}catch(error){together.leaving=false;throw error;}
   else try{await togetherRemote('leave',{id:together.id});}catch{}
-  files.forEach(f=>clearTimeout(f.togetherTimer));
-  Object.assign(together,{mode:null,code:'',connected:false,members:[],previous:null,leaving:false});disk.setTransport(null);
+  clearTogetherFileTimers();
+  Object.assign(together,{mode:null,code:'',connected:false,busy:false,members:[],previous:null,leaving:false});disk.setTransport(null);
   if(mode==='guest') {
     const saved=JSON.parse(previous||'null');
     installTogetherWorkspace({name:saved?.name||'Workspace',root:saved?.nativeRoot||null,files:[],folders:saved?.folders||[]});
@@ -202,7 +269,7 @@ async function recoverTogether() {
   if(!saved?.files?.length)return toast('No remote workspace recovery copy is available.','error');
   if(!await guardUnsaved(files,'Save before opening the remote recovery copy.'))return;
   installTogetherWorkspace({name:saved.name+' (recovery)',root:null,files:[],folders:saved.folders||[]});
-  files=saved.files.map(f=>({...f,disk:null,isDraft:!f.unsupported,diskConflict:null,saveError:null,saving:false,togetherTimer:null}));
+  files=saved.files.map(f=>({...f,disk:null,isDraft:!f.unsupported,diskConflict:null,saveError:null,saving:false}));
   switchTab(files.find(f=>!f.unsupported)?.id||null);persist();closeModal();toast('Recovered remote edits as local drafts. Use Save As to keep them on this computer.');
 }
 let togetherActionBusy=false;
@@ -210,6 +277,6 @@ async function togetherTask(action) {
   if(togetherActionBusy)return;togetherActionBusy=true;
   try{await action();}catch(error){toast(nativeError(error),'error');}finally{togetherActionBusy=false;}
 }
-setInterval(pollTogether,1000);
+setInterval(pollTogether,225);
 
 Object.assign(together,{readOnly:togetherReadOnly,allowed:togetherAllowed,edited:togetherEdited});
