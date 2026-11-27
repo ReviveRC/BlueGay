@@ -24,6 +24,12 @@ for(const script of ['dist/java-tools.js','dist/debugger-core.js','dist/debugger
   assert.equal(result.status,0,result.stderr);
 }
 const main=fs.readFileSync('src-tauri/src/main.rs','utf8');
+for(const asset of ['custom-languages.js','custom-language-ui.js','basic-completions.js']){
+  assert(fs.readFileSync('dist/boot.js','utf8').includes("'"+asset+"'"));
+  const checked=spawnSync(process.execPath,['--check','dist/'+asset],{encoding:'utf8'});assert.equal(checked.status,0,checked.stderr);
+}
+const languagePacks=await import('../dist/custom-languages.js');
+languagePacks.default.validatePack(JSON.parse(fs.readFileSync('dist/language-packs/nomix.json','utf8')));
 const previewRust=['previews','launch'].map(name=>fs.readFileSync('src-tauri/src/'+name+'.rs','utf8')).join('\n');
 for(const script of ['dist/preview-core.js','dist/previews.js','dist/error-help.js','preview-server.mjs','scripts/build-previews.mjs'])assert.equal(spawnSync(process.execPath,['--check',script],{encoding:'utf8'}).status,0,script);
 for(const asset of ['vendor/previews/markdown.js','vendor/previews/pdf.mjs','vendor/previews/pdf.worker.mjs'])assert(fs.existsSync(path.join('dist',asset)),`Missing preview library ${asset}`);

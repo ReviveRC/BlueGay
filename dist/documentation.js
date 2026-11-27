@@ -89,7 +89,7 @@ async function generateDocumentation(plan,progress,epoch=chat.epoch,{includeComm
       try{
         const current=files.find(f=>f.id===source.id&&f.path===source.path);
         if(!current||current.content!==source.content)throw Error('Source changed; generate again to document the new contents.');
-        const payload=documentationCore.request(source,settings);
+        const payload=documentationCore.request(source,{...settings,languageReferences:customLanguageReferences([source])});
         if(settings.provider==='chatgpt'){payload.auth_provider='chatgpt';payload.account_id=accountId;}
         const raw=await requestDocumentation(payload,job,status);
         documentationCheck(job);

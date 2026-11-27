@@ -4,8 +4,8 @@ window.BlueGaySettings=(()=>{
   const invoke=window.__TAURI__?.core?.invoke;
   let token,queue=Promise.resolve();
   const cached=key=>{try{return JSON.parse(localStorage.getItem(key)||'{}');}catch{return {};}};
-  const snapshot=()=>({version:1,preferences:cached('bluegay.preferences'),chat:cached('bluegay.agent.settings')});
-  const cache=value=>{localStorage.setItem('bluegay.preferences',JSON.stringify(value.preferences));localStorage.setItem('bluegay.agent.settings',JSON.stringify(value.chat));};
+  const snapshot=()=>({version:1,preferences:cached('bluegay.preferences'),chat:cached('bluegay.agent.settings'),customLanguages:JSON.parse(localStorage.getItem('bluegay.languages')||'[]')});
+  const cache=value=>{localStorage.setItem('bluegay.preferences',JSON.stringify(value.preferences));localStorage.setItem('bluegay.agent.settings',JSON.stringify(value.chat));localStorage.setItem('bluegay.languages',JSON.stringify(value.customLanguages||[]));};
   async function request(method,value){
     if(invoke)return method==='GET'?invoke('load_settings'):invoke('save_settings',{settings:value});
     const response=await fetch('/api/settings',{method,headers:method==='PUT'?{'Content-Type':'application/json','X-BlueGay-Settings':token}:{},body:method==='PUT'?JSON.stringify(value):undefined,signal:AbortSignal.timeout(5000)});

@@ -1,3 +1,10 @@
+# 1.0.7 — Custom languages and completion
+
+- Add Preferences → Languages with a language definition form, JSON import/export, live file associations, syntax highlighting, comments, brackets, keywords and snippets. Packs persist in local settings and cannot contain executable plugins.
+- Include a Nomix `.nx` example based on the language's local guide and dice program. Enabled references accompany matching chat attachments, inline predictions and documentation requests. Inline predictions can be enabled per custom language.
+- Enable Tab completion and offline keywords for basic languages, expand Java snippets, and allow AI predictions to extend selected word completions. Explicit Java project imports can contribute prediction context. Prediction failures are accessible from the status bar.
+- Add unit, settings persistence, native validation, and rendered browser regression checks. See CUSTOM-LANGUAGES.md for setup.
+
 # 1.0.6 — Faster collaboration and settings import
 
 - Code Together polls about four times per second and sends changed files to updated participants. An in-flight refresh reconciles files independently of concurrent local saves.

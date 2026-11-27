@@ -41,6 +41,15 @@ test('invalid existing JSON is preserved rather than overwritten on load',async 
   assert.equal((await fetch(f.url)).status,400);
   assert.equal(await fs.readFile(f.file,'utf8'),'not json');
 });
+
+test('custom language packs round-trip through disk settings and cannot contain executable fields',async t=>{
+  const f=await fixture(t),pack=require('../dist/language-packs/nomix.json');
+  const value={...structuredClone(defaults),customLanguages:[pack]};
+  assert.equal((await f.put(value)).status,200);
+  const restarted=await fixture(t,f.file);assert.deepEqual(restarted.initial.settings.customLanguages,[pack]);
+  assert.equal((await f.put({...value,customLanguages:[{...pack,command:'run'}]})).status,400);
+  assert.deepEqual(JSON.parse(await fs.readFile(f.file,'utf8')),value);
+});
 async function client(initial,load){
   const storage=new Map(Object.entries(initial));const calls=[];
   const window={__TAURI__:{core:{invoke:async(command,args)=>{calls.push({command,args});if(command==='load_settings')return load;return {path:'settings.json'};}}}};

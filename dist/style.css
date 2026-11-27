@@ -46,3 +46,25 @@ dialog.debug-settings-modal{width:700px;max-width:calc(100vw - 30px);max-height:
 .vscode-import-offer { max-width: min(400px, calc(100vw - 40px)); }
 .vscode-import-offer > div { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 10px; }
 #vscode-import-preview { max-height: 180px; overflow: auto; padding-left: 20px; line-height: 1.65; }
+
+/* Custom language settings and editor. */
+.language-actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.language-settings .setting-row{gap:16px;flex-wrap:wrap}
+.language-settings .setting-row small{color:var(--muted);font-weight:400}
+.language-modal{width:min(850px,94vw)}
+.language-form{display:grid;gap:16px;max-height:76vh;overflow:auto}
+.language-form p{margin:0;color:var(--muted);line-height:1.5}
+.language-form h3{margin:6px 0 0}
+.language-form label{display:grid;gap:7px;font-size:13px}
+.language-form input:not([type=checkbox]),.language-form textarea{width:100%;box-sizing:border-box;background:var(--base);color:var(--text);border:1px solid var(--line);border-radius:7px;padding:9px 11px;font:inherit}
+.language-form textarea{font-family:Consolas,monospace;resize:vertical;line-height:1.45}
+.language-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+.language-form .language-check{display:flex;align-items:center;gap:9px}
+.language-form .language-check input[type=checkbox]{width:16px;height:16px;flex:0 0 16px;margin:0}
+.language-form details{border:1px solid var(--line);border-radius:7px;padding:12px}
+.language-form details[open]{display:grid;gap:14px}
+.language-form summary{cursor:pointer;font-weight:600}
+.language-form #language-edit-status:not(:empty){color:var(--error,#ef889c)}
+#prediction-indicator{color:var(--warning,#f1d48b)}
+.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
+@media(max-width:650px){.language-grid{grid-template-columns:1fr}}

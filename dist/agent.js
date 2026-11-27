@@ -52,7 +52,7 @@ function ensureChatLGBT(){
     <div class="chat-compose"><div class="chat-attach-tools"><button id="chat-attach-current">＋ Current file</button><button id="chat-attach-selection">Selection</button><button id="chat-search">⌕ Project</button></div><div id="chat-attachments" class="chat-attachments"></div>
     <textarea id="chat-prompt" aria-label="Message ChatLGBT" placeholder="What are we building, bestie?" maxlength="12000" rows="3"></textarea>
     <div class="chat-send-row"><span id="chat-estimate">No files attached</span><button id="chat-stop" class="secondary-button" hidden>Stop</button><button id="chat-send" class="primary-button">Send ↗</button></div>
-    <p class="chat-privacy">Sends your message, recent chat and attached code to OpenAI. Review attachments before sending.</p><div id="chat-status" role="status" aria-live="polite"></div></div>`;
+    <p class="chat-privacy">Sends your message, recent chat, attached code and enabled language references to OpenAI. Review attachments before sending.</p><div id="chat-status" role="status" aria-live="polite"></div></div>`;
   $('.workbench').append(panel);chat.ready=true;
   $('#chat-close').onclick=()=>toggleChatLGBT(false);
   $('#chat-new').onclick=()=>{resetChatLGBT();$('#chat-prompt').value='';};
@@ -155,7 +155,7 @@ function renderChatAttachments(){
   chat.attachments.forEach(item=>{const button=document.createElement('button');button.className='chat-chip';button.textContent=(item.selection?'Selection · ':'')+item.path+' ×';button.title='Remove '+item.path;button.onclick=()=>{chat.attachments=chat.attachments.filter(a=>a!==item);renderChatAttachments();};root.append(button);});
   updateChatEstimate();
 }
-function updateChatEstimate(){if(!chat.ready)return;try{const attachments=collectChatAttachments();const payload=chatCore.buildRequest({prompt:$('#chat-prompt').value.trim()||'Hello',attachments,history:chat.messages.filter(m=>!m.error&&!m.failed).map(m=>({role:m.role,text:m.role==='assistant'?chatCore.visibleReply(m.text):m.text})),...chatSettings});$('#chat-estimate').textContent=`~${Math.ceil(JSON.stringify(payload).length/4).toLocaleString()} input tokens · estimate`;}catch(error){$('#chat-estimate').textContent='Context needs attention';}}
+function updateChatEstimate(){if(!chat.ready)return;try{const attachments=collectChatAttachments();const payload=chatCore.buildRequest({prompt:$('#chat-prompt').value.trim()||'Hello',attachments,languageReferences:customLanguageReferences(attachments),history:chat.messages.filter(m=>!m.error&&!m.failed).map(m=>({role:m.role,text:m.role==='assistant'?chatCore.visibleReply(m.text):m.text})),...chatSettings});$('#chat-estimate').textContent=`~${Math.ceil(JSON.stringify(payload).length/4).toLocaleString()} input tokens · estimate`+(customLanguageReferences(attachments).length?' · Language reference: '+customLanguageReferences(attachments).map(r=>r.language).join(', '):'');}catch(error){$('#chat-estimate').textContent='Context needs attention';}}
 function searchChatContext(){
   openModal('<div class="modal-header"><h2>Attach project context</h2><button class="icon-button" data-action="closeModal">×</button></div><div class="modal-body"><p>Search filenames or code locally. Only files you attach are sent.</p><input id="chat-context-query" aria-label="Search project context" placeholder="Filename, function, or text…"><div id="chat-context-results" class="chat-context-results"></div></div>');
   const input=$('#chat-context-query');
@@ -173,7 +173,7 @@ async function sendChatMessage(){
   const prompt=$('#chat-prompt').value.trim();if(!prompt)return;
   try{validateChatModel(chatSettings.model);}catch(error){showChatSettings();$('#chat-settings-status').textContent=error.message;return;}
   let attachments,payload;
-  try{attachments=collectChatAttachments();payload=chatCore.buildRequest({prompt,attachments,history:chat.messages.filter(m=>!m.error&&!m.failed).map(m=>({role:m.role,text:m.role==='assistant'?chatCore.visibleReply(m.text):m.text})),...chatSettings});if(chatSettings.provider==='chatgpt'){payload.auth_provider='chatgpt';payload.account_id=window.BlueGayAccount?.state.activeId||'';}}catch(error){chatNotice(error.message);return;}
+  try{attachments=collectChatAttachments();payload=chatCore.buildRequest({prompt,attachments,languageReferences:customLanguageReferences(attachments),history:chat.messages.filter(m=>!m.error&&!m.failed).map(m=>({role:m.role,text:m.role==='assistant'?chatCore.visibleReply(m.text):m.text})),...chatSettings});if(chatSettings.provider==='chatgpt'){payload.auth_provider='chatgpt';payload.account_id=window.BlueGayAccount?.state.activeId||'';}}catch(error){chatNotice(error.message);return;}
   const request={id:uid(),epoch:chat.epoch,controller:new AbortController(),stopped:false};chat.request=request;renderChat();
   const reply={role:'assistant',text:''};const userMessage={role:'user',text:prompt,context:attachments.map(a=>a.path+(a.selection?' (selection)':''))};let completed=false,streamError=null;
   try{

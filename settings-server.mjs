@@ -2,10 +2,12 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import {randomBytes} from 'node:crypto';
+import languages from './dist/custom-languages.js';
 const defaults=JSON.parse(await fs.readFile(new URL('./settings-defaults.json',import.meta.url),'utf8'));
 export const settingsPath=path.join(process.env.APPDATA||path.join(os.homedir(),'.config'),'app.bluegay.ide','settings.json');
 export function validateSettings(value){
-  if(!value||value.version!==1||Object.keys(value).some(k=>!['version','preferences','chat'].includes(k)))throw Error('Invalid settings format.');
+  if(!value||value.version!==1||Object.keys(value).some(k=>!['version','preferences','chat','customLanguages'].includes(k)))throw Error('Invalid settings format.');
+  if(value.customLanguages!==undefined)languages.validatePacks(value.customLanguages);
   for(const group of ['preferences','chat']){
     const values=value[group];
     if(!values||typeof values!=='object'||Array.isArray(values))throw Error('Invalid settings group.');
@@ -25,11 +27,11 @@ export function createSettingsHandler({file=settingsPath}={}){
       if(req.method==='GET'){
         await writes;
         let settings=null;
-        try{const text=await fs.readFile(file,'utf8');if(text.length>16000)throw Error('Settings too large');settings=validateSettings(JSON.parse(text));}catch(error){if(error.code!=='ENOENT')throw error;}
+        try{const text=await fs.readFile(file,'utf8');if(Buffer.byteLength(text)>1048576)throw Error('Settings too large');settings=validateSettings(JSON.parse(text));}catch(error){if(error.code!=='ENOENT')throw error;}
         json(200,{settings,path:file,token});
       }else if(req.method==='PUT'){
         if(req.headers['x-bluegay-settings']!==token||req.headers['content-type']!=='application/json'){json(403,{error:'Reload BlueGay before saving settings.'});return true;}
-        const chunks=[];let size=0;for await(const chunk of req){size+=chunk.length;if(size>16000)throw Error('Settings too large');chunks.push(chunk);}
+        const chunks=[];let size=0;for await(const chunk of req){size+=chunk.length;if(size>1048576)throw Error('Settings too large');chunks.push(chunk);}
         const value=validateSettings(JSON.parse(Buffer.concat(chunks).toString('utf8')));
         const write=async()=>{
           await fs.mkdir(path.dirname(file),{recursive:true});
