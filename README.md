@@ -6,7 +6,7 @@ BlueGay is open source under the [MIT license](LICENSE). Third-party components 
 
 A customizable IDE with a shared Monaco interface and a Tauri 2 Windows desktop backend. A Windows release executable is available at `release/BlueGay.exe`.
 
-Version **1.0.7** adds custom language packs, includes a Nomix example, and improves Java Tab completion and inline predictions. See [BlueGay releases](https://github.com/ReviveRC/BlueGay/releases) and [UPDATES.md](UPDATES.md) for installing, publishing, and signing updates.
+Version **1.0.8** adds Nomix execution to the Windows console and highlights expressions inside Nomix f-strings. See [BlueGay releases](https://github.com/ReviveRC/BlueGay/releases) and [UPDATES.md](UPDATES.md) for installing, publishing, and signing updates.
 
 Double-click `release/BlueGay.exe` to run it. See [BUILD.md](BUILD.md) for rebuilding and [DESKTOP.md](DESKTOP.md) for architecture, native behavior, verification, and current limits.
 
@@ -14,7 +14,7 @@ Double-click `release/BlueGay.exe` to run it. See [BUILD.md](BUILD.md) for rebui
 
 **Code Together:** the icon below ChatLGBT hosts your open folder or joins a collaborator's project using an invite code. Includes host-controlled permissions, live file updates, collaborator badges and colored cursor labels. Both computers need the desktop app and a shared LAN or VPN. See [CODE-TOGETHER.md](CODE-TOGETHER.md) for setup and synchronization limits.
 
-**Run and debug:** Python and Java launch debugging, a host-controlled guest console permission, and **Ctrl+Alt+B** to open the active or Explorer-selected HTML file in your default browser. See [DEBUGGING.md](DEBUGGING.md) for runtime setup and shortcuts.
+**Run and debug:** Python and Java support debugging, and **Ctrl+F5** runs Nomix scripts with the installed interpreter. Code Together hosts control guest console access. Use **Ctrl+Alt+B** to open the active or Explorer-selected HTML file in your default browser. See [DEBUGGING.md](DEBUGGING.md) for runtime setup and shortcuts.
 
 **Java compilation and tests:** **Ctrl+Shift+B** compiles the project and **Ctrl+Alt+T** runs JUnit tests. The JAVA TESTS panel shows each pass/failure/skip, assertion details, source navigation and **Rerun failed**. JUnit 4/5 and plain folders such as `TEST.java` are supported alongside imported Java projects. Right-click an Explorer folder → **New file…** creates a file directly inside it. See [JAVA-TESTING.md](JAVA-TESTING.md).
 

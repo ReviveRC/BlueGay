@@ -38,7 +38,8 @@
   function monacoTheme(id,accent){
     const theme=get(id),c=theme.colors;
     return {base:theme.mode==='light'?'vs':'vs-dark',inherit:true,
-      rules:Object.entries(theme.syntax).map(([token,color])=>({token:token==='type'?'type.identifier':token,foreground:color.slice(1),...(token==='comment'?{fontStyle:'italic'}:{})})),
+      rules:[...Object.entries(theme.syntax).map(([token,color])=>({token:token==='type'?'type.identifier':token,foreground:color.slice(1),...(token==='comment'?{fontStyle:'italic'}:{})})),
+        {token:'delimiter.interpolation',foreground:theme.syntax.keyword.slice(1)}],
       colors:{'editor.background':c.editor,'editor.foreground':c.text,'editorLineNumber.foreground':c.muted,'editorLineNumber.activeForeground':accent,'editorCursor.foreground':accent,'editor.lineHighlightBackground':c.raised,'editor.selectionBackground':accent+'40','editor.inactiveSelectionBackground':accent+'25','editorIndentGuide.background1':c.line,'editorWidget.background':c.raised,'editorWidget.foreground':c.text,'editorSuggestWidget.background':c.raised,'editorSuggestWidget.foreground':c.text,'editorSuggestWidget.border':c.line,'editorSuggestWidget.selectedBackground':c.hover,'editorSuggestWidget.selectedForeground':c.text,'editorHoverWidget.background':c.raised,'editorHoverWidget.foreground':c.text,'editorHoverWidget.border':c.line,'editorGutter.background':c.editor,'minimap.background':c.editor,'scrollbarSlider.background':c.muted+'44','scrollbarSlider.hoverBackground':c.muted+'77'}
     };
   }

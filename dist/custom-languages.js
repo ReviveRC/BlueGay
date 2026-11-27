@@ -73,10 +73,25 @@
     const root=[],tokenizer={root},brackets=pack.brackets||[['{','}'],['[',']'],['(',')']];
     if(pack.lineComment)root.push([new RegExp(escape(pack.lineComment)+'.*$'),'comment']);
     if(pack.blockComment?.length){root.push([new RegExp(escape(pack.blockComment[0])),'comment','@comment']);tokenizer.comment=[[new RegExp(escape(pack.blockComment[1])),'comment','@pop'],[/./,'comment']];}
-    const prefix=(pack.stringPrefixes||[]).length?'(?:'+pack.stringPrefixes.map(escape).join('|')+')?':'';
+    const prefixes=(pack.stringPrefixes||[]).filter(prefix=>pack.id!=='nomix'||prefix!=='f');
+    const prefix=prefixes.length?'(?:'+prefixes.map(escape).join('|')+')?':'';
     [...pack.quotes||['"',"'"]].sort((a,b)=>b.length-a.length).forEach((quote,i)=>{
-      const state='string'+i;root.push([new RegExp(prefix+escape(quote)),'string','@'+state]);
-      tokenizer[state]=[[/\\./,'string.escape'],[new RegExp(escape(quote)),'string','@pop'],[/./,'string']];
+      const delimiter=escape(quote),state='string'+i;
+      if(pack.id==='nomix'){
+        const formatted='formatted'+i,expression='expression'+i;
+        root.push([new RegExp('f'+delimiter),'string','@'+formatted]);
+        tokenizer[formatted]=[
+          [/\\./,'string.escape'],
+          [new RegExp(delimiter),'string','@pop'],
+          [/\{\{|\}\}/,'string.escape'],
+          [/\{/,'delimiter.interpolation','@'+expression],
+          [/./,'string'],
+        ];
+        tokenizer[expression]=[[/\}/,'delimiter.interpolation','@pop'],{include:'@root'}];
+        if(quote.length===1)tokenizer[formatted].splice(1,0,[/$/,'string','@pop']);
+      }
+      root.push([new RegExp(prefix+delimiter),'string','@'+state]);
+      tokenizer[state]=[[/\\./,'string.escape'],[new RegExp(delimiter),'string','@pop'],[/./,'string']];
       if(quote.length===1)tokenizer[state].splice(1,0,[/$/,'string','@pop']);
     });
     for(const [open,close]of brackets)root.push([new RegExp('(?:'+escape(open)+'|'+escape(close)+')'),'delimiter.bracket']);

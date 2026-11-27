@@ -1,7 +1,8 @@
 /* Debugger UI. Program output and expressions are always rendered as text. */
 window.BlueGayDebugger=(()=>{
   const core=window.BlueGayDebugCore;
-  const state={phase:'idle',status:'Ready to run Python or Java',lines:[],threads:[],frames:[],scopes:[],variables:new Map(),expanded:new Set(),watches:[],watchValues:[],breakpoints:{},config:{args:[],env:{},stopOnEntry:false,exceptions:'uncaught',mainClass:''},decorations:new Map(),stoppedEpoch:0,showErrors:false};
+  const state={phase:'idle',status:'Ready to run Python, Java, or Nomix',lines:[],threads:[],frames:[],scopes:[],variables:new Map(),expanded:new Set(),watches:[],watchValues:[],breakpoints:{},config:{args:[],env:{},stopOnEntry:false,exceptions:'uncaught',mainClass:''},decorations:new Map(),stoppedEpoch:0,showErrors:false};
+  let pendingNomixOutput='';
   try{state.breakpoints=JSON.parse(localStorage.getItem('bluegay.debug.breakpoints')||'{}');state.watches=JSON.parse(localStorage.getItem('bluegay.debug.watches')||'[]').filter(s=>typeof s==='string').slice(0,50);state.config={...state.config,...JSON.parse(localStorage.getItem('bluegay.debug.launch')||'{}')};}catch{}
   const canUse=()=>window.BlueGayTogether?.mode!=='guest'||!!(window.BlueGayTogether.connected&&window.BlueGayTogether.permissions.console);
   const sessionRoutes=new Map();
@@ -30,7 +31,18 @@ window.BlueGayDebugger=(()=>{
   }
   function handleEvent(type,body){
     window.BlueGayJavaTools?.handleEvent(type,body);
-    if(type==='output'){if(body.category==='adapter'){state.adapterOutput=((state.adapterOutput||'')+body.output).slice(-16000);if(state.config.diagnostics)log(body.output);return;}log(body.output,body.category);return;}
+    if(type==='output'){
+      if(body.category==='adapter'){state.adapterOutput=((state.adapterOutput||'')+body.output).slice(-16000);if(state.config.diagnostics)log(body.output);return;}
+      if(engine.session?.language==='nomix' && body.category==='stdout'){
+        const {parts,pending}=core.readNomixOutput(body.output,pendingNomixOutput);
+        pendingNomixOutput=pending;
+        parts.forEach((part,index)=>{
+          if(index)clearConsole();
+          log(part,'stdout');
+        });
+      }else log(body.output,body.category);
+      return;
+    }
     if(type==='status'){state.phase=body.phase;state.status=body.text;if(body.phase==='running'){state.frames=[];state.scopes=[];state.variables.clear();clearExecutionLine();}}
     if(type==='progress'&&state.phase==='starting')state.status=body.text||'Preparing Java project…';
     if(type==='error'){state.status=body.message;state.showErrors=true;log(body.message+'\n','stderr');if(state.adapterOutput&&!state.config.diagnostics)log(state.adapterOutput,'stderr');}
@@ -38,7 +50,9 @@ window.BlueGayDebugger=(()=>{
     if(type==='breakpoint')refreshBreakpointDecorations();
     if(type==='diagnostics'&&body.diagnostics?.some(d=>d.severity===1)){for(const d of body.diagnostics.filter(d=>d.severity===1).slice(0,20))log((body.uri||'')+':'+(d.range.start.line+1)+' '+d.message+'\n','stderr');}
     if(type==='exited')log('Process exited with code '+body.exitCode+'.\n');
-    if(type==='ended'){state.phase='idle';state.frames=[];state.threads=[];state.scopes=[];state.variables.clear();state.watchValues=[];state.stoppedEpoch++;clearExecutionLine();if(!state.showErrors)state.status='Debug session ended';}
+    if(type==='ended'){
+      pendingNomixOutput='';state.phase='idle';state.frames=[];state.threads=[];state.scopes=[];state.variables.clear();state.watchValues=[];state.stoppedEpoch++;clearExecutionLine();if(!state.showErrors)state.status=state.lastLaunch?.config.language==='nomix'?'Nomix run ended':'Debug session ended';
+    }
     refresh();
   }
   function showError(error){const message=error?.message||String(error);state.status=message;state.showErrors=true;log(message+'\n','stderr');refresh();}
@@ -47,12 +61,18 @@ window.BlueGayDebugger=(()=>{
     if(!disk.available){showError(Error('Running and debugging require the desktop app.'));open();return;}
     if(engine.session&&engine.paused&&!noDebug){await control('continue');return;}
     if(['starting','stopping'].includes(state.phase)||engine.session)return;
-    const file=currentFile();if(!file||file.unsupported||file.previewOnly||! /\.(py|java)$/i.test(file.path)){open();showError(Error('Open a Python or Java source file to run or debug.'));return;}
+    const file=currentFile();
+    const extension=file?.path.match(/\.(py|java|nx)$/i)?.[1].toLowerCase();
+    if(!extension||file.unsupported||file.previewOnly){open();showError(Error('Open a Python, Java, or Nomix source file to run.'));return;}
+    const language={py:'python',java:'java',nx:'nomix'}[extension];
+    if(language==='nomix' && (!noDebug||window.BlueGayTogether?.mode==='guest')){
+      open();showError(Error(noDebug?'Nomix programs run only on the local desktop.':'Use Run without debugging (Ctrl+F5) for Nomix.'));return;
+    }
     if(files.some(fileDirty)&&!await saveAllFiles())return;
-    if(!file.disk){showError(Error('Save this file before debugging.'));return;}
-    open();state.showErrors=false;state.lines=[];state.adapterOutput='';state.watchValues=[];state.expanded.clear();drawOutput(document.querySelector('#debug-output'));
+    if(!file.disk){open();showError(Error('Save this file before running.'));return;}
+    open();state.showErrors=false;clearConsole();state.adapterOutput='';state.watchValues=[];state.expanded.clear();
     const standalone=!nativeRoot,root=nativeRoot||file.disk.path;
-    const config=core.validateConfig({...state.config,language:/\.py$/i.test(file.path)?'python':'java',path:standalone?file.path.split('/').pop():file.path,noDebug});
+    const config=core.validateConfig({...state.config,language,args:language==='nomix'?[]:state.config.args,path:standalone?file.path.split('/').pop():file.path,noDebug});
     state.lastLaunch={root,config,content:file.content,mainClass:state.config.mainClass,exceptions:state.config.exceptions};
     try{await engine.start(state.lastLaunch);}catch(error){showError(error);}
   }
@@ -124,6 +144,7 @@ window.BlueGayDebugger=(()=>{
   function open(){panelView='debug';prefs.showPanel=true;$('#bottom-panel').hidden=false;renderPanel();}
   function button(label,action,disabled=false){const button=document.createElement('button');button.textContent=label;button.disabled=disabled;button.onclick=()=>Promise.resolve().then(action).catch(showError);return button;}
   function drawOutput(output){if(!output)return;output.replaceChildren();for(const line of state.lines){const span=document.createElement('span');span.className='debug-output-'+line.category;span.textContent=line.text;output.append(span);}output.scrollTop=output.scrollHeight;}
+  function clearConsole(){state.lines=[];drawOutput(document.querySelector('#debug-output'));}
   function render(root){
     $('#bottom-panel')?.classList.add('debug-panel');
     if(!root.querySelector('#debugger-panel')){
@@ -138,8 +159,11 @@ window.BlueGayDebugger=(()=>{
   function refresh(){
     const toolbar=document.querySelector('#debug-toolbar');if(!toolbar)return;
     const allowed=canUse(),running=!!engine.session,paused=engine.paused,starting=['starting','stopping'].includes(state.phase);
-    toolbar.replaceChildren(button('▶ Run',()=>run(true),!allowed||running||starting),button(paused?'▶ Continue':'▷ Debug',()=>run(false),!allowed||starting||running&&!paused),button('Ⅱ Pause',()=>control('pause'),!allowed||!running||paused),button('↷ Over',()=>control('next'),!allowed||!paused),button('↓ Into',()=>control('stepIn'),!allowed||!paused),button('↑ Out',()=>control('stepOut'),!allowed||!paused),button('↻ Restart',restart,!allowed||!state.lastLaunch),button('■ Stop',()=>engine.stop(),!allowed||!running&&!starting),button('Settings',settingsDialog,!allowed),button('Clear',()=>{state.lines=[];drawOutput($('#debug-output'));}));
+    toolbar.replaceChildren(button('▶ Run',()=>run(true),!allowed||running||starting),button(paused?'▶ Continue':'▷ Debug',()=>run(false),!allowed||starting||running&&!paused),button('Ⅱ Pause',()=>control('pause'),!allowed||!running||paused),button('↷ Over',()=>control('next'),!allowed||!paused),button('↓ Into',()=>control('stepIn'),!allowed||!paused),button('↑ Out',()=>control('stepOut'),!allowed||!paused),button('↻ Restart',restart,!allowed||!state.lastLaunch),button('■ Stop',()=>engine.stop(),!allowed||!running&&!starting),button('Settings',settingsDialog,!allowed),button('Clear',clearConsole));
     $('#debug-status').textContent=!allowed?'The host has disabled the console and debugger.':state.status;
+    const inputMode=$('#debug-input-mode');
+    if(engine.session?.language==='nomix')inputMode.value='stdin';
+    inputMode.disabled=engine.session?.language==='nomix';
     $('#debug-input').disabled=!allowed||!running||starting;$('#debug-send').disabled=!allowed||!running||starting;
     const threadSelect=$('#debug-threads');threadSelect.replaceChildren();for(const thread of state.threads){const option=document.createElement('option');option.value=thread.id;option.textContent=thread.name;threadSelect.append(option);}threadSelect.value=engine.threadId??'';
     const stack=$('#debug-stack');stack.replaceChildren();for(const frame of state.frames){const entry=button(frame.name+' · '+(frame.source?.name||frame.source?.path?.split(/[\\/]/).pop()||'source')+':'+frame.line,()=>selectFrame(frame));entry.className=frame.id===engine.frameId?'selected':'';stack.append(entry);}
@@ -152,13 +176,13 @@ window.BlueGayDebugger=(()=>{
   async function chooseMain(classes){return new Promise(resolve=>{let chosen=false;openModal('<div class="modal-header"><h2>Choose Java main class</h2><button class="icon-button" data-action="closeModal">×</button></div><div class="modal-body"><label>Main class<select id="debug-main-class" aria-label="Main class"></select></label><button class="primary-button" id="debug-main-launch">Launch</button></div>');classes.forEach((entry,index)=>{const option=document.createElement('option');option.value=index;option.textContent=entry.mainClass+(entry.projectName?' · '+entry.projectName:'');$('#debug-main-class').append(option);});modalCleanup=()=>{if(!chosen)resolve(null);};$('#debug-main-launch').onclick=()=>{chosen=true;const selected=classes[+$('#debug-main-class').value];closeModal();resolve(selected);};});}
   async function settingsDialog(){
     if(!canUse())return;let info;
-    openModal('<div class="modal-header"><h2>Debugger settings</h2><button class="icon-button" data-action="closeModal">×</button></div><div class="modal-body" id="debug-settings-body"><p>Checking Python and Java runtimes…</p></div>','debug-settings-modal');
+    openModal('<div class="modal-header"><h2>Debugger settings</h2><button class="icon-button" data-action="closeModal">×</button></div><div class="modal-body" id="debug-settings-body"><p>Checking runtimes…</p></div>','debug-settings-modal');
     try{info=await transport('info');}catch(error){$('#debug-settings-body').textContent=error.message||String(error);return;}
     if(!document.querySelector('#debug-settings-body'))return;
     const guest=window.BlueGayTogether?.mode==='guest';
-    $('#debug-settings-body').innerHTML=`<p>Python uses debugpy. Java uses the Java Debug Server and Eclipse JDT Language Server for project builds and dependencies. Java debugging tools require a JDK 21 or newer.</p><label>Python executable<input id="debug-python-path" aria-label="Python executable" value="${escapeHtml(info.settings.python||'')}" ${guest?'disabled':''} placeholder="Full path to python.exe"></label><label>Java executable<input id="debug-java-path" aria-label="Java executable" value="${escapeHtml(info.settings.java||'')}" ${guest?'disabled':''} placeholder="Full path to a JDK's java.exe"></label><p>${escapeHtml(info.pythonVersion||'Python was not found.')}<br>${escapeHtml(info.javaVersion||'Java was not found.')}</p><div class="debug-setup-buttons"><button id="debug-install-python" class="secondary-button" ${guest?'disabled':''}>${info.pythonReady?'Reinstall':'Set up'} Python debugger</button><button id="debug-install-java" class="secondary-button" ${guest?'disabled':''}>${info.javaReady?'Reinstall':'Set up'} Java debugger</button></div><p>Setup downloads the pinned debug adapters into BlueGay's settings folder. Your Python environments and JDK installations are kept separate.</p><label>Program arguments (JSON array)<textarea id="debug-arguments" aria-label="Program arguments">${escapeHtml(JSON.stringify(state.config.args))}</textarea></label><label>Environment variables (JSON object)<textarea id="debug-environment" aria-label="Environment variables">${escapeHtml(JSON.stringify(state.config.env))}</textarea></label><label>Java main class (optional)<input id="debug-main-override" aria-label="Java main class" value="${escapeHtml(state.config.mainClass||'')}" placeholder="Detect from selected source file"></label><label class="debug-checkbox-row" for="debug-stop-entry"><input type="checkbox" id="debug-stop-entry" ${state.config.stopOnEntry?'checked':''}><span><strong>Stop on entry</strong><small>Pause before the first statement when debugging.</small></span></label><label>Pause on exceptions<select id="debug-exceptions"><option value="none">Never</option><option value="uncaught">Uncaught exceptions</option><option value="all">All exceptions</option></select></label><label class="debug-checkbox-row" for="debug-diagnostics"><input type="checkbox" id="debug-diagnostics" ${state.config.diagnostics?'checked':''}><span><strong>Show debugger diagnostic output</strong><small>Include adapter startup logs in the debug console.</small></span></label><p id="debug-settings-status" role="status">${guest?'Ask the host to install or change debugger tools.':(info.pythonReady?'Python ready. ':'')+(info.javaReady?'Java ready.':'')}</p><div class="modal-footer"><button class="secondary-button" data-action="closeModal">Cancel</button><button id="debug-settings-save" class="primary-button">Save settings</button></div>`;
+    $('#debug-settings-body').innerHTML=`<p>Python uses debugpy. Java uses the Java Debug Server and Eclipse JDT Language Server for project builds and dependencies. Java debugging tools require a JDK 21 or newer.</p><label>Python executable<input id="debug-python-path" aria-label="Python executable" value="${escapeHtml(info.settings.python||'')}" ${guest?'disabled':''} placeholder="Full path to python.exe"></label><label>Java executable<input id="debug-java-path" aria-label="Java executable" value="${escapeHtml(info.settings.java||'')}" ${guest?'disabled':''} placeholder="Full path to a JDK's java.exe"></label>${guest?'':`<label>Nomix script<input id="debug-nomix-path" aria-label="Nomix script" value="${escapeHtml(info.settings.nomix||'')}" placeholder="Full path to nomix.py (blank uses PATH)"></label><p>${info.nomixScript?'Nomix script: '+escapeHtml(info.nomixScript):'Nomix was not found on PATH.'}</p>`}<p>${escapeHtml(info.pythonVersion||'Python was not found.')}<br>${escapeHtml(info.javaVersion||'Java was not found.')}</p><div class="debug-setup-buttons"><button id="debug-install-python" class="secondary-button" ${guest?'disabled':''}>${info.pythonReady?'Reinstall':'Set up'} Python debugger</button><button id="debug-install-java" class="secondary-button" ${guest?'disabled':''}>${info.javaReady?'Reinstall':'Set up'} Java debugger</button></div><p>Setup downloads the pinned debug adapters into BlueGay's settings folder. Your Python environments and JDK installations are kept separate.</p><label>Program arguments (JSON array)<textarea id="debug-arguments" aria-label="Program arguments">${escapeHtml(JSON.stringify(state.config.args))}</textarea></label><label>Environment variables (JSON object)<textarea id="debug-environment" aria-label="Environment variables">${escapeHtml(JSON.stringify(state.config.env))}</textarea></label><label>Java main class (optional)<input id="debug-main-override" aria-label="Java main class" value="${escapeHtml(state.config.mainClass||'')}" placeholder="Detect from selected source file"></label><label class="debug-checkbox-row" for="debug-stop-entry"><input type="checkbox" id="debug-stop-entry" ${state.config.stopOnEntry?'checked':''}><span><strong>Stop on entry</strong><small>Pause before the first statement when debugging.</small></span></label><label>Pause on exceptions<select id="debug-exceptions"><option value="none">Never</option><option value="uncaught">Uncaught exceptions</option><option value="all">All exceptions</option></select></label><label class="debug-checkbox-row" for="debug-diagnostics"><input type="checkbox" id="debug-diagnostics" ${state.config.diagnostics?'checked':''}><span><strong>Show debugger diagnostic output</strong><small>Include adapter startup logs in the debug console.</small></span></label><p id="debug-settings-status" role="status">${guest?'Ask the host to install or change debugger tools.':(info.pythonReady?'Python ready. ':'')+(info.javaReady?'Java ready.':'')}</p><div class="modal-footer"><button class="secondary-button" data-action="closeModal">Cancel</button><button id="debug-settings-save" class="primary-button">Save settings</button></div>`;
     $('#debug-exceptions').value=state.config.exceptions;
-    const saveRuntime=()=>guest?Promise.resolve():transport('settings',{settings:{python:$('#debug-python-path').value.trim(),java:$('#debug-java-path').value.trim()}});
+    const saveRuntime=()=>guest?Promise.resolve():transport('settings',{settings:{python:$('#debug-python-path').value.trim(),java:$('#debug-java-path').value.trim(),nomix:$('#debug-nomix-path').value.trim()}});
     for(const language of ['python','java'])$('#debug-install-'+language).onclick=async()=>{const status=$('#debug-settings-status');try{await saveRuntime();$('#debug-install-python').disabled=true;$('#debug-install-java').disabled=true;status.textContent='Setting up '+language+' debugging tools. This may take a few minutes…';const result=await transport('install',{language});status.textContent=(result.pythonReady?'Python ready. ':'')+(result.javaReady?'Java ready.':'');}catch(error){status.textContent=error.message||String(error);}finally{if(document.querySelector('#debug-install-python')){$('#debug-install-python').disabled=guest;$('#debug-install-java').disabled=guest;}}};
     $('#debug-settings-save').onclick=async()=>{try{const config={...state.config,args:JSON.parse($('#debug-arguments').value),env:JSON.parse($('#debug-environment').value),stopOnEntry:$('#debug-stop-entry').checked,exceptions:$('#debug-exceptions').value,diagnostics:$('#debug-diagnostics').checked,mainClass:$('#debug-main-override').value.trim()};core.validateConfig({...config,language:'python',path:'check.py'});await saveRuntime();state.config=config;localStorage.setItem('bluegay.debug.launch',JSON.stringify(config));closeModal();}catch(error){$('#debug-settings-status').textContent=error.message||String(error);}};
   }

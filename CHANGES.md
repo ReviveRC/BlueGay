@@ -1,3 +1,9 @@
+# 1.0.8 — Run Nomix in BlueGay
+
+- Run saved Nomix `.nx` files with Ctrl+F5 in the Windows desktop app. BlueGay uses the installed Nomix interpreter and streams program input and output through the console, including `system("clear")`.
+- Highlight expressions inside Nomix f-strings, including multiline strings.
+- Refresh the Nomix pack with HTTP request snippets and the language reference for system commands, HTTP responses, JSON, and string casing.
+
 # 1.0.7 — Custom languages and completion
 
 - Add Preferences → Languages with a language definition form, JSON import/export, live file associations, syntax highlighting, comments, brackets, keywords and snippets. Packs persist in local settings and cannot contain executable plugins.

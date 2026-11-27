@@ -38,6 +38,23 @@ const {chromium}=optional('playwright');
     await page.keyboard.press('Tab');assert.equal(await page.evaluate(()=>editor.getModel().getValueInRange(editor.getSelection())),'args');
     const tokens=await page.evaluate(()=>monaco.editor.tokenize('function run() {\n // note\n print(f"""hello\nworld""")\n}','custom-nomix'));
     assert(tokens[0].some(t=>t.type.startsWith('keyword')));assert(tokens[1].some(t=>t.type.startsWith('comment')));assert(tokens[3].some(t=>t.type.startsWith('string')));
+    const interpolation=await page.evaluate(()=>{
+      const source=`print(f"this is a string {1+6} and {{literal}} {f'{2}'}")`;
+      const multiline='print(f"""first {\n1 + 6\n} last""")';
+      const tokens=monaco.editor.tokenize(source,'custom-nomix')[0];
+      const tokenAt=fragment=>tokens.findLast(t=>t.offset<=source.indexOf(fragment)).type;
+      return {literal:tokenAt('this'),start:tokenAt('{1'),number:tokenAt('1+'),operator:tokenAt('+6'),
+        tail:tokenAt(' and'),escaped:tokenAt('{{'),nested:tokenAt('2}'),
+        multiline:monaco.editor.tokenize(multiline,'custom-nomix')[1]};
+    });
+    assert.match(interpolation.literal,/^string\./);
+    assert.match(interpolation.start,/^delimiter\.interpolation/);
+    assert.match(interpolation.number,/^number\./);
+    assert.match(interpolation.operator,/^operator\./);
+    assert.match(interpolation.tail,/^string\./);
+    assert.match(interpolation.escaped,/^string\.escape/);
+    assert.match(interpolation.nested,/^number\./);
+    assert(interpolation.multiline.some(t=>t.type.startsWith('number.')));
     await setCode('','Demo.java');await type('pub');await page.locator('.suggest-widget.visible').waitFor();await page.keyboard.press('Tab');assert.equal(await page.evaluate(()=>editor.getValue()),'public');
     await setCode('class Demo {\n  ');await type('sout');await page.locator('.suggest-widget.visible').waitFor();await page.keyboard.press('Tab');assert.match(await page.evaluate(()=>editor.getValue()),/System\.out\.println\(value\);/);
     await setCode('class Demo {\n  ');await type('for');await page.locator('.suggest-widget.visible').waitFor();await page.keyboard.press('Tab');assert.match(await page.evaluate(()=>editor.getValue()),/for \(int i = 0; i < count; i\+\+\)/);

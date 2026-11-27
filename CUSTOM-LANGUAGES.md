@@ -18,7 +18,8 @@ A file's manually selected language mode takes precedence over both.
    brace blocks, regular and triple-quoted strings, and `f` string prefixes.
    Expand **Brackets, strings and snippets** to inspect its snippets.
 4. The **Language guide** and **Working examples** contain the Nomix README and
-   dice example available on November 26, 2026. Update them here as Nomix changes.
+   dice example. If you already installed the sample, you can open the updated
+   example and review it before saving over the previous definition.
 5. Select **Add language**. Open or create a `.nx` file. The status bar should
    show **Nomix** immediately, including files that were already open.
 6. Type `function`, `for`, `if`, `print`, `fetch`, or `try`, select the matching
@@ -28,6 +29,19 @@ A file's manually selected language mode takes precedence over both.
 Alternatively, select **Import language pack** and choose
 `dist/language-packs/nomix.json`. Imports open a review form before saving.
 Use **Export** to share a pack and **Edit** to update it.
+
+## Run Nomix in BlueGay
+
+Open a saved `.nx` file in the Windows app and press **Ctrl+F5**, or use
+**Run → Run without debugging**. BlueGay uses the installed Nomix interpreter
+and shows output and prompts in the console. If Nomix is missing from PATH,
+open **Run → Debugger settings** and enter the full path to `nomix.py`.
+The installation needs Python 3.10 or later. Nomix runs on the local desktop.
+
+The updated runtime supports `system("clear")`, shell commands, `request.get()`,
+`request.post()`, and the `.lower()` and `.upper()` string methods. The editor
+highlights code inside Nomix f-string braces, including in a previously installed
+Nomix pack. See the language guide for HTTP options and response methods.
 
 ## AI with Nomix
 
@@ -102,7 +116,5 @@ whenever a suggestion is selected. Java prediction context can also include
 explicitly imported project classes. Prediction failures appear as an **AI
 prediction · attention** status-bar control; click it for the reason.
 
-These additions do not provide Java type-aware member completion or full compiler
-diagnostics. Those require a Java language service. Nomix's interpreter likewise
-remains external to the editor's Run/debugger integration; run `.nx` files with
-your existing `nomix` command in a terminal.
+Java type-aware member completion and full compiler diagnostics require a Java
+language service.

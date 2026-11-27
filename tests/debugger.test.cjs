@@ -44,6 +44,26 @@ test('repeated stop and restart wait for the same native process cleanup',async(
 });
 function ui(invoke=async()=>{}){const h=harness(invoke);h.context.window.BlueGayDebugCore=core;h.run(fs.readFileSync('dist/together.js','utf8'));h.run(fs.readFileSync('dist/debugger.js','utf8'));return h;}
 
+test('Nomix Run uses the native process directly and clears the IDE console on split output',async()=>{
+  const calls=[];const finished=new Promise(resolve=>{
+    const engine=new core.Engine({transport:async(operation)=>{
+      calls.push(operation);
+      if(operation==='open')return {session:'nomix-run',language:'nomix'};
+      if(operation==='poll')return {events:[],stopped:true};
+    },onEvent(type){if(type==='ended'&&calls.includes('stop'))resolve();}});
+    engine.start({root:'project',config:{language:'nomix',path:'main.nx',args:[],env:{},noDebug:true}});
+  });
+  await finished;
+  assert.deepEqual(calls,['open','poll','stop']);
+  const h=ui();
+  h.run(String.raw`document.querySelector=()=>null;
+    const nomix=window.BlueGayDebugger.engine;
+    nomix.session={language:'nomix'};
+    nomix.emit('output',{category:'stdout',output:'before\x1b[2'});
+    nomix.emit('output',{category:'stdout',output:'J\x1b[Hafter'});`);
+  assert.equal(h.run("window.BlueGayDebugger.state.lines.map(line=>line.text).join('')"),'after');
+});
+
 test('breakpoints follow Monaco-tracked line changes and retain their condition',()=>{
   const h=ui();let changed,position=6;
   h.context.bpModel={getLineCount:()=>20,deltaDecorations:(_old,points)=>points.map((_p,index)=>'bp'+index),onDidChangeContent:callback=>changed=callback,getDecorationRange:()=>({startLineNumber:position})};

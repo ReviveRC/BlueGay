@@ -10,7 +10,12 @@ type Result<T> = std::result::Result<T,String>;
 type Writer = Arc<Mutex<Box<dyn Write+Send>>>;
 #[derive(Clone,Default,Deserialize,Serialize)]
 #[serde(rename_all="camelCase")]
-pub struct Settings { pub python:String,pub java:String }
+pub struct Settings {
+    pub python: String,
+    pub java: String,
+    #[serde(default)]
+    pub nomix: String,
+}
 #[derive(Clone,Deserialize,Serialize)]
 #[serde(rename_all="camelCase")]
 struct Launch {
@@ -45,6 +50,9 @@ impl DebuggerState {
                 if owner!="local"{return Err("Only the host can change debugger runtimes.".into());}
                 let settings:Settings=serde_json::from_value(args["settings"].clone()).map_err(|_|"Invalid debugger settings")?;
                 for path in [&settings.python,&settings.java]{if path.len()>2000||path.chars().any(char::is_control){return Err("Invalid runtime path.".into());}if !path.is_empty()&&(!Path::new(path).is_absolute()||!Path::new(path).is_file()){return Err("Select an existing Python or Java executable.".into());}}
+                if !settings.nomix.is_empty() && !setup::valid_nomix_script(Path::new(&settings.nomix)) {
+                    return Err("Select an existing Nomix nomix.py file.".into());
+                }
                 fs::create_dir_all(&self.inner.home).map_err(err)?;fs::write(self.inner.home.join("settings.json"),serde_json::to_vec_pretty(&settings).map_err(err)?).map_err(err)?;
                 setup::info(&self.inner.home,&settings)
             }
@@ -53,7 +61,10 @@ impl DebuggerState {
             "poll"=>{
                 let session=self.session(args,owner)?;let after=args["after"].as_u64().unwrap_or(0);
                 let events=session.events.lock().map_err(|_|"Debugger unavailable")?;
-                Ok(json!({"events":events.iter().filter(|event|event["id"].as_u64().unwrap_or(0)>after).take(256).cloned().collect::<Vec<_>>(),"stopped":session.stopped.load(Ordering::SeqCst),"first":events.front().map(|e|e["id"].clone())}))
+                let mut queued = events.iter().filter(|event|event["id"].as_u64().unwrap_or(0)>after);
+                let batch = queued.by_ref().take(256).cloned().collect::<Vec<_>>();
+                let drained = queued.next().is_none();
+                Ok(json!({"events":batch,"stopped":drained && session.stopped.load(Ordering::SeqCst),"first":events.front().map(|e|e["id"].clone())}))
             }
             "send"=>{let session=self.session(args,owner)?;if session.stopped.load(Ordering::SeqCst){return Err("Debug session has ended.".into());}let peer=text(args,"peer")?;let mut message=args["message"].clone();session.validate_message(peer,&mut message)?;session.send(peer,&message)?;Ok(Value::Null)},
             "connect"=>{
@@ -70,18 +81,38 @@ impl DebuggerState {
     }
     fn open(&self,args:&Value,root:&Path,owner:&str)->Result<Value>{
         let launch:Launch=serde_json::from_value(args["config"].clone()).map_err(|_|"Invalid launch configuration")?;
-        if !["python","java"].contains(&launch.language.as_str())||launch.args.len()>128||launch.args.iter().any(|s|s.len()>8000||s.contains('\0'))||launch.env.len()>128||launch.env.iter().any(|(k,v)|k.is_empty()||k.contains(['=','\0'])||v.contains('\0')||k.len()+v.len()>16000){return Err("Invalid debug arguments or environment.".into());}
+        let extension = match launch.language.as_str() {
+            "python" => "py",
+            "java" => "java",
+            "nomix" if owner != "local" => return Err("Nomix programs run only on the local desktop.".into()),
+            "nomix" if !launch.no_debug => return Err("Use Run without debugging (Ctrl+F5) for Nomix.".into()),
+            "nomix" => "nx",
+            _ => return Err("Choose a Python, Java, or Nomix source file.".into()),
+        };
+        if launch.args.len()>128||launch.args.iter().any(|s|s.len()>8000||s.contains('\0'))||launch.env.len()>128||launch.env.iter().any(|(k,v)|k.is_empty()||k.contains(['=','\0'])||v.contains('\0')||k.len()+v.len()>16000){return Err("Invalid debug arguments or environment.".into());}
+        if launch.language == "nomix" && !launch.args.is_empty() {
+            return Err("Nomix programs do not accept program arguments yet. Clear Program arguments in Debugger settings.".into());
+        }
         let root=fs::canonicalize(root).map_err(err)?;let program=safe_source(&root,&launch.path)?;
-        let extension=program.extension().and_then(|s|s.to_str()).unwrap_or("");
-        if (launch.language=="python"&&extension!="py")||(launch.language=="java"&&extension!="java"){return Err("Choose a Python or Java source file.".into());}
-        let settings=setup::resolve(&self.settings());let info=setup::info(&self.inner.home,&settings)?;
-        if !info[if launch.language=="python"{"pythonReady"}else{"javaReady"}].as_bool().unwrap_or(false){return Err("Set up the selected language in Run → Debugger settings first.".into());}
+        if !program.extension().and_then(|s|s.to_str()).is_some_and(|s|s.eq_ignore_ascii_case(extension)) {
+            return Err(format!("Choose a .{extension} source file."));
+        }
+        let saved = self.settings();
+        let nomix = if launch.language == "nomix" { Some(setup::nomix_runtime(&saved)?) } else { None };
+        let settings = if nomix.is_some() { saved } else { setup::resolve(&saved) };
+        let info = if nomix.is_some() { Value::Null } else { setup::info(&self.inner.home,&settings)? };
+        if nomix.is_none() && !info[if launch.language=="python"{"pythonReady"}else{"javaReady"}].as_bool().unwrap_or(false){return Err("Set up the selected language in Run → Debugger settings first.".into());}
         let mut sessions=self.inner.sessions.lock().map_err(|_|"Debugger unavailable")?;
         if sessions.values().any(|s|s.owner==owner&&!s.stopped.load(Ordering::SeqCst)){return Err("Stop the current debug session first.".into());}
         sessions.retain(|_,s|!s.stopped.load(Ordering::SeqCst));
         if sessions.len()>=33{return Err("Too many active debug sessions. Stop a session before launching another.".into());}
         let mut bytes=[0;16];getrandom::fill(&mut bytes).map_err(err)?;let id=bytes.iter().map(|b|format!("{b:02x}")).collect::<String>();
         let session=Arc::new(Session{id:id.clone(),owner:owner.into(),root:root.clone(),home:self.inner.home.clone(),launch:launch.clone(),settings:settings.clone(),peers:Mutex::new(BTreeMap::new()),children:Mutex::new(vec![]),input:Mutex::new(None),events:Mutex::new(VecDeque::new()),serial:AtomicU64::new(0),bytes:Mutex::new(0),stopped:AtomicBool::new(false),port_requests:Mutex::new(BTreeSet::new()),dap_port:Mutex::new(None),test_started:AtomicBool::new(false)});
+        if let Some((python, script)) = nomix {
+            session.run_nomix(&python, &script, &program)?;
+            sessions.insert(id.clone(), session);
+            return Ok(json!({"session":id,"language":"nomix","root":root,"program":program}));
+        }
         let paths=setup::java_paths(&self.inner.home);
         // Each participant needs a separate JDT workspace: Eclipse locks its
         // project cache for the lifetime of the language server.
@@ -103,16 +134,58 @@ impl DebuggerState {
 }
 impl Session {
     fn event(&self,peer:&str,message:Value){
-        let id=self.serial.fetch_add(1,Ordering::SeqCst)+1;
-        let event=json!({"id":id,"peer":peer,"message":message});let length=event.to_string().len();
         if let (Ok(mut events),Ok(mut bytes))=(self.events.lock(),self.bytes.lock()){
+            let id=self.serial.fetch_add(1,Ordering::SeqCst)+1;
+            let event=json!({"id":id,"peer":peer,"message":message});let length=event.to_string().len();
             *bytes+=length;events.push_back(event);
             while events.len()>4000||(*bytes>4*1024*1024&&events.len()>1){let index=events.iter().position(|event|event["message"]["event"]=="output").unwrap_or(0);if let Some(old)=events.remove(index){*bytes=bytes.saturating_sub(old.to_string().len());}else{break;}}
         }
     }
     fn output(&self,category:&str,text:impl AsRef<str>){self.event("system",json!({"type":"event","event":"output","body":{"category":category,"output":text.as_ref()}}));}
-    fn capture<R:Read+Send+'static>(self:&Arc<Self>,mut reader:R,category:&'static str){
-        let session=self.clone();thread::spawn(move||{let mut bytes=[0;4096];let mut pending=Vec::new();while !session.stopped.load(Ordering::SeqCst){match reader.read(&mut bytes){Ok(0)|Err(_)=>break,Ok(n)=>{pending.extend_from_slice(&bytes[..n]);match std::str::from_utf8(&pending){Ok(text)=>{session.output(category,text);pending.clear();},Err(e)=>{let end=e.valid_up_to();if end>0{session.output(category,String::from_utf8_lossy(&pending[..end]));pending.drain(..end);}if e.error_len().is_some(){session.output(category,String::from_utf8_lossy(&pending));pending.clear();}}}}}}if !pending.is_empty(){session.output(category,String::from_utf8_lossy(&pending));}});
+    fn capture<R:Read+Send+'static>(self:&Arc<Self>,mut reader:R,category:&'static str)->thread::JoinHandle<()>{
+        let session=self.clone();thread::spawn(move||{let mut bytes=[0;4096];let mut pending=Vec::new();while !session.stopped.load(Ordering::SeqCst){match reader.read(&mut bytes){Ok(0)|Err(_)=>break,Ok(n)=>{pending.extend_from_slice(&bytes[..n]);match std::str::from_utf8(&pending){Ok(text)=>{session.output(category,text);pending.clear();},Err(e)=>{let end=e.valid_up_to();if end>0{session.output(category,String::from_utf8_lossy(&pending[..end]));pending.drain(..end);}if e.error_len().is_some(){session.output(category,String::from_utf8_lossy(&pending));pending.clear();}}}}}}if !pending.is_empty(){session.output(category,String::from_utf8_lossy(&pending));}})
+    }
+    fn run_nomix(self: &Arc<Self>, python: &Path, script: &Path, program: &Path) -> Result<()> {
+        let mut child = hidden(python)
+            .args(["-E", "-s", "-B", "-u", "-X", "utf8"])
+            .arg(script)
+            .arg(program)
+            .current_dir(&self.root)
+            .envs(&self.launch.env)
+            .env("NOMIX_BLUEGAY_CONSOLE", "1")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|error| format!("Cannot launch Nomix: {error}"))?;
+        *self.input.lock().map_err(|_| "Console unavailable")? = child.stdin.take();
+        let stdout = self.capture(child.stdout.take().expect("piped Nomix stdout"), "stdout");
+        let stderr = self.capture(child.stderr.take().expect("piped Nomix stderr"), "stderr");
+        self.children.lock().map_err(|_| "Console unavailable")?.push(child);
+        let session = self.clone();
+        thread::spawn(move || {
+            let status = loop {
+                if session.stopped.load(Ordering::SeqCst) { return; }
+                let status = session.children.lock().ok()
+                    .and_then(|mut children| children.first_mut().map(Child::try_wait));
+                match status {
+                    Some(Ok(None)) => thread::sleep(Duration::from_millis(20)),
+                    Some(Ok(Some(status))) => break status.code().unwrap_or(1),
+                    _ => break 1,
+                }
+            };
+            // Drain normal output before reporting exit. A detached descendant
+            // may hold an inherited pipe open after the interpreter exits.
+            let deadline = std::time::Instant::now() + Duration::from_millis(500);
+            while (!stdout.is_finished() || !stderr.is_finished()) && std::time::Instant::now() < deadline {
+                if session.stopped.load(Ordering::SeqCst) { return; }
+                thread::sleep(Duration::from_millis(10));
+            }
+            if session.stopped.load(Ordering::SeqCst) { return; }
+            session.event("system", json!({"type":"event","event":"exited","body":{"exitCode":status}}));
+            session.stop();
+        });
+        Ok(())
     }
     fn peer<R:Read+Send+'static,W:Write+Send+'static>(self:&Arc<Self>,name:&str,reader:R,writer:W)->Result<()>{
         self.peers.lock().map_err(|_|"Debugger unavailable")?.insert(name.into(),Arc::new(Mutex::new(Box::new(writer))));
@@ -277,6 +350,57 @@ pub async fn debugger_request(app:tauri::AppHandle,operation:String,args:Value)-
         assert!(state.dispatch("settings",&json!({"settings":{"python":"","java":""}}),None,"guest:one").is_err());
         assert!(state.dispatch("install",&json!({"language":"java"}),None,"guest:one").is_err());
         assert!(state.dispatch("poll",&json!({"session":"missing"}),None,"guest:one").is_err());
+        let request = json!({"config":{"language":"nomix","path":"program.nx","noDebug":true}});
+        assert_eq!(state.dispatch("open", &request, Some(temp.path()), "guest:one").unwrap_err(),
+            "Nomix programs run only on the local desktop.");
+    }
+    #[test]
+    #[ignore = "requires the updated Nomix interpreter via BLUEGAY_NOMIX_SCRIPT"]
+    fn nomix_native_run() {
+        let script = std::env::var("BLUEGAY_NOMIX_SCRIPT").unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path().join("project");
+        fs::create_dir(&project).unwrap();
+        let python = std::env::var("BLUEGAY_NOMIX_PYTHON").unwrap_or_default();
+        fs::write(temp.path().join("settings.json"),
+            serde_json::to_vec(&json!({"python":python,"java":"","nomix":script})).unwrap()).unwrap();
+        fs::write(project.join("program.NX"), concat!(
+            "print(\"before\")\nsystem(\"clear\")\n",
+            "system(\"echo from shell\")\n",
+            "name = input(\"Name? \")\nprint(name.upper(), \"Été\".lower())\n",
+        )).unwrap();
+        let state = DebuggerState::new(temp.path().into());
+        let opened = state.dispatch("open", &json!({"config":{"language":"nomix","path":"program.NX","noDebug":true}}),
+            Some(&project), "local").unwrap();
+        let session = &opened["session"];
+        let mut cursor = 0;
+        let mut output = String::new();
+        let mut input_sent = false;
+        let mut exit_code = None;
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let poll = state.dispatch("poll", &json!({"session":session,"after":cursor}), None, "local").unwrap();
+            for event in poll["events"].as_array().unwrap() {
+                cursor = event["id"].as_u64().unwrap();
+                let message = &event["message"];
+                match message["event"].as_str() {
+                    Some("output") => output.push_str(message["body"]["output"].as_str().unwrap()),
+                    Some("exited") => exit_code = message["body"]["exitCode"].as_i64(),
+                    _ => {}
+                }
+            }
+            if !input_sent && output.contains("Name? ") {
+                state.dispatch("input", &json!({"session":session,"text":"Ada\n"}), None, "local").unwrap();
+                input_sent = true;
+            }
+            if poll["stopped"] == true { break; }
+            assert!(std::time::Instant::now() < deadline, "{output}");
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(exit_code, Some(0), "{output}");
+        assert!(output.contains("\x1b[2J\x1b[Hfrom shell"), "{output}");
+        assert!(output.contains("ADA été"), "{output}");
+        state.dispatch("stop", &json!({"session":session}), None, "local").unwrap();
     }
     // A local-only integration harness exercises the exact native process and
     // adapter boundary with debugger-core.js. Run explicitly, never in normal tests.

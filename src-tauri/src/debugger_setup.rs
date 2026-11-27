@@ -23,8 +23,8 @@ fn probe(program:&str,args:&[&str],python_path:Option<&Path>)->Option<String>{
     let output=child.wait_with_output().ok()?;if !output.status.success(){return None;}
     Some((String::from_utf8_lossy(&output.stdout).to_string()+&String::from_utf8_lossy(&output.stderr)).trim().into())
 }
-pub fn resolve(settings:&Settings)->Settings{
-    let mut python=settings.python.clone();let mut java=settings.java.clone();
+fn resolve_python(settings: &Settings) -> String {
+    let mut python = settings.python.clone();
     if python.is_empty(){
         let mut candidates=vec![];
         if let Some(local)=std::env::var_os("LOCALAPPDATA"){if let Ok(entries)=fs::read_dir(PathBuf::from(local).join("Programs/Python")){for entry in entries.flatten(){let exe=entry.path().join("python.exe");if exe.is_file(){candidates.push(exe.to_string_lossy().to_string());}}}}
@@ -32,12 +32,48 @@ pub fn resolve(settings:&Settings)->Settings{
         for candidate in candidates{if let Some(path)=probe(&candidate,&["-c","import sys; print(sys.executable)"],None){if Path::new(&path).is_file(){python=path;break;}}}
         if python.is_empty(){if let Some(path)=probe("py",&["-3","-c","import sys; print(sys.executable)"],None){if Path::new(&path).is_file(){python=path;}}}
     }
+    python
+}
+pub fn resolve(settings:&Settings)->Settings{
+    let python=resolve_python(settings);let mut java=settings.java.clone();
     if java.is_empty(){
         if let Some(home)=std::env::var_os("JAVA_HOME"){let exe=PathBuf::from(home).join("bin/java.exe");if exe.is_file(){java=exe.to_string_lossy().into();}}
         if java.is_empty(){if let Some(programs)=std::env::var_os("ProgramFiles"){for folder in ["Java","Eclipse Adoptium","Microsoft"]{if let Ok(entries)=fs::read_dir(PathBuf::from(&programs).join(folder)){let mut paths=entries.flatten().map(|e|e.path().join("bin/java.exe")).filter(|p|p.is_file()).collect::<Vec<_>>();paths.sort();if let Some(path)=paths.pop(){java=path.to_string_lossy().into();break;}}}}}
         if java.is_empty(){if let Some(properties)=probe("java",&["-XshowSettings:properties","-version"],None){if let Some(home)=properties.lines().find_map(|line|line.trim().strip_prefix("java.home = ")){java=Path::new(home).join("bin/java.exe").to_string_lossy().into();}}}
     }
-    Settings{python,java}
+    Settings{python,java,nomix:settings.nomix.clone()}
+}
+
+pub fn valid_nomix_script(path: &Path) -> bool {
+    path.is_absolute()
+        && path.file_name().and_then(|name| name.to_str()).is_some_and(|name| name.eq_ignore_ascii_case("nomix.py"))
+        && path.is_file()
+}
+
+fn nomix_script(settings: &Settings) -> Option<PathBuf> {
+    if !settings.nomix.is_empty() {
+        let path = PathBuf::from(&settings.nomix);
+        return valid_nomix_script(&path).then_some(path);
+    }
+    let paths = std::env::var_os("PATH")?;
+    std::env::split_paths(&paths)
+        .filter(|folder| folder.is_absolute() && folder.join("nomix.cmd").is_file())
+        .map(|folder| folder.join("nomix.py"))
+        .find(|path| valid_nomix_script(path))
+}
+
+pub fn nomix_runtime(settings: &Settings) -> Result<(PathBuf, PathBuf)> {
+    let script = nomix_script(settings)
+        .ok_or("Select the installed nomix.py in Run → Debugger settings or put Nomix on PATH.")?;
+    let hint = script.with_file_name("nomix-python.txt");
+    let hinted_python = fs::read_to_string(hint).ok().map(|text| PathBuf::from(text.trim()));
+    let python = hinted_python
+        .filter(|path| path.is_absolute() && path.is_file())
+        .unwrap_or_else(|| PathBuf::from(resolve_python(settings)));
+    if !python.is_absolute() || !python.is_file() {
+        return Err("Nomix needs Python 3.10 or newer. Select a Python executable in Debugger settings.".into());
+    }
+    Ok((python, script))
 }
 fn python_home(home:&Path,settings:&Settings)->PathBuf{home.join("python").join(hash(&settings.python))}
 pub fn python_env(command:&mut Command,home:&Path,settings:&Settings){
@@ -48,7 +84,7 @@ pub fn info(home:&Path,settings:&Settings)->Result<Value>{
     let python_ready=python_version.is_some()&&probe(&settings.python,&["-c","import debugpy; print(debugpy.__version__)"],Some(&python_home(home,&settings))).is_some();
     let java_major=java_version.as_deref().and_then(|s|s.split('"').nth(1)).and_then(|s|s.split('.').next()).and_then(|s|s.parse::<u32>().ok()).unwrap_or(0);
     let paths=java_paths(home);
-    Ok(json!({"settings":settings,"pythonVersion":python_version,"javaVersion":java_version,"javaMajor":java_major,"pythonReady":python_ready,"javaReady":java_major>=21&&paths.launcher.is_some()&&paths.config.is_dir()&&paths.bundle.is_some(),"javaTestsReady":junit_jar(home).is_file(),"home":home}))
+    Ok(json!({"settings":settings,"nomixScript":nomix_script(&settings),"pythonVersion":python_version,"javaVersion":java_version,"javaMajor":java_major,"pythonReady":python_ready,"javaReady":java_major>=21&&paths.launcher.is_some()&&paths.config.is_dir()&&paths.bundle.is_some(),"javaTestsReady":junit_jar(home).is_file(),"home":home}))
 }
 pub fn install(home:&Path,settings:&Settings,language:&str)->Result<Value>{
     let settings=resolve(settings);fs::create_dir_all(home).map_err(err)?;

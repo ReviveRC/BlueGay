@@ -4,10 +4,25 @@
   function relativeSource(root,path){const base=normalize(root),source=normalize(path);return source.toLowerCase().startsWith(base.toLowerCase()+'/')?source.slice(base.length+1):source;}
   function mainClassFor(path,content){const source=content.replace(/\/\*[\s\S]*?\*\//g,'').replace(/\/\/[^\r\n]*/g,'');const pkg=/\bpackage\s+([\w.]+)\s*;/.exec(source)?.[1];const name=path.split(/[\\/]/).pop().replace(/\.java$/i,'');return (pkg?pkg+'.':'')+name;}
   function validateConfig(config){
-    if(!['python','java'].includes(config.language)||!config.path)throw Error('Choose a Python or Java source file.');
+    if(!['python','java','nomix'].includes(config.language)||!config.path)throw Error('Choose a Python, Java, or Nomix source file.');
+    if(config.language==='nomix'&&!config.noDebug)throw Error('Use Run without debugging (Ctrl+F5) for Nomix.');
     if(!Array.isArray(config.args)||config.args.length>128||config.args.some(s=>typeof s!=='string'||s.length>8000||s.includes('\0')))throw Error('Arguments must be a JSON array of strings.');
     if(!config.env||typeof config.env!=='object'||Array.isArray(config.env)||Object.keys(config.env).length>128||Object.entries(config.env).some(([k,v])=>!k||/[=\0]/.test(k)||typeof v!=='string'||v.includes('\0')||k.length+v.length>16000))throw Error('Environment must be a JSON object with string values.');
     return config;
+  }
+  const clearSequence='\x1b[2J\x1b[H';
+  function readNomixOutput(chunk,pending=''){
+    const parts=(pending+chunk).split(clearSequence);
+    const last=parts.length-1;
+    let suffix='';
+    for(let size=Math.min(parts[last].length,clearSequence.length-1);size>0;size--){
+      if(parts[last].endsWith(clearSequence.slice(0,size))){
+        suffix=parts[last].slice(-size);
+        parts[last]=parts[last].slice(0,-size);
+        break;
+      }
+    }
+    return {parts,pending:suffix};
   }
   class Engine {
     constructor({transport,onEvent=()=>{},chooseMain=async classes=>classes[0],getBreakpoints=()=>[],pollDelay=150}){Object.assign(this,{transport,onEvent,chooseMain,getBreakpoints,pollDelay});this.pending=new Map();this.waiters=new Map();this.seq=0;this.cursor=0;this.session=null;this.epoch=0;this.paused=false;this.capabilities={};this.frameId=null;this.threadId=null;}
@@ -77,11 +92,17 @@
       finally{if(epoch===this.epoch)await this.stop();}
     }
     async start({root,config,content='',mainClass='',projectName='',exceptions='uncaught'}){
-      validateConfig(config);await this.stop();const epoch=++this.epoch;this.emit('status',{text:'Starting debugger…',phase:'starting'});
+      validateConfig(config);await this.stop();const epoch=++this.epoch;this.emit('status',{text:config.language==='nomix'?'Starting Nomix…':'Starting debugger…',phase:'starting'});
       try{
         const opened=await this.transport('open',{root,config});
         if(epoch!==this.epoch){await this.transport('stop',{session:opened.session});return;}
-        this.session=opened;this.config=config;this.cursor=0;this.capabilities={};this.poll(epoch);
+        this.session=opened;this.config=config;this.cursor=0;this.capabilities={};
+        if(config.language==='nomix'){
+          this.emit('status',{text:'Nomix program running',phase:'running'});
+          this.poll(epoch);
+          return;
+        }
+        this.poll(epoch);
         let launch={};
         if(config.language==='java'){
           await this.prepareJava(content);
@@ -165,5 +186,5 @@
       try{await this.stopPromise;}finally{this.stopPromise=null;}
     }
   }
-  return {Engine,normalize,relativeSource,mainClassFor,validateConfig};
+  return {Engine,normalize,relativeSource,mainClassFor,validateConfig,readNomixOutput};
 });

@@ -2,6 +2,11 @@
 
 Run and debug are available in the Windows desktop app. No AI connection is needed.
 
+For Nomix, open a saved `.nx` file and press **Ctrl+F5** to run it in the local
+console. BlueGay finds the installed interpreter on PATH, or you can choose
+`nomix.py` in **Run → Debugger settings**. See [Custom languages](CUSTOM-LANGUAGES.md)
+for the pack and runtime setup.
+
 For project compilation and JUnit test results, use **Run → Compile Java project** / **Run Java tests**. See [JAVA-TESTING.md](JAVA-TESTING.md) for the test/fix workflow and a `TEST.java` example.
 
 ## First-time setup

@@ -1,10 +1,11 @@
-# BlueGay 1.0.7
+# BlueGay 1.0.8
 
 BlueGay is an **unofficial parody of BlueJ IDE**, independent of and unaffiliated with the BlueJ project.
 
-- **Custom languages** are available in **Preferences → Languages**. Create or import a JSON pack to add file associations, highlighting, comments, brackets, keyword suggestions, and Tab snippets. Packs can be edited and exported.
-- **Nomix** is included as an example pack. Select **Use Nomix example**, review it, and click **Add language** to enable support for `.nx` files. Use your existing Nomix interpreter to run them.
-- **AI language references** let ChatLGBT use a custom language guide and examples with matching attached code. Each pack can also enable inline predictions. Both features use your configured ChatLGBT connection.
-- **Java completion** adds offline keywords and more snippets, including `sout`, `psvm`, and `for`. Press **Ctrl+Space** to open suggestions and **Tab** to accept. AI predictions can extend selected word completions, and **Alt+\** requests a prediction manually.
+- **Run Nomix from BlueGay.** Open a saved `.nx` file and press **Ctrl+F5**. The Windows console shows program output, accepts input, and handles `system("clear")`.
+- **Read f-strings more easily.** Nomix expressions inside `{…}` use code colors, including in multiline strings.
+- **Updated Nomix pack.** The sample includes HTTP request snippets and reference material for `system()`, `request.get()`, `request.post()`, JSON, `.lower()`, and `.upper()`.
 
-Download **BlueGay-1.0.7.exe** or choose **Help → Check for updates** in an existing updater-enabled build.
+Running `.nx` files requires a separate Nomix installation and Python 3.10 or newer. Use the updated interpreter for the new runtime functions. BlueGay detects Nomix on PATH, or you can set the path to `nomix.py` in **Run → Debugger settings**. Use **Preferences → Languages → Use Nomix example** to review the updated pack.
+
+Download **BlueGay-1.0.8.exe** or choose **Help → Check for updates** in BlueGay.
